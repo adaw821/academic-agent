@@ -18,6 +18,9 @@ public class ScheduleItemEntity {
     @GeneratedValue(strategy= GenerationType.IDENTITY)
     private int id;
 
+    @Column(name = "user_id")
+    private Long userId;
+
     @Column(name = "course_name")
     private String courseName;
 

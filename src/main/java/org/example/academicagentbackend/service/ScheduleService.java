@@ -1,7 +1,9 @@
-package org.example.academicagentbackend.service;
+package org.example.academicagentbackend.service;  // ← 包名应该是 service.impl
 
-import org.example.academicagentbackend.model.CourseInfoEntity;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import org.example.academicagentbackend.mapper.ScheduleItemMapper;  // ← 注意这里
 import org.example.academicagentbackend.model.ScheduleItemEntity;
+import org.example.academicagentbackend.service.impl.ScheduleServiceImpl;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpEntity;
 import org.springframework.stereotype.Service;
@@ -12,36 +14,41 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 
-
 @Service
-public class ScheduleService {
-    public ScheduleItemEntity handleScheduleImage(MultipartFile file){
+public class ScheduleService
+        extends ServiceImpl<ScheduleItemMapper, ScheduleItemEntity>  // ← 这里必须是 ScheduleItemMapper
+        implements ScheduleServiceImpl {
+
+    @Override
+    public ScheduleItemEntity handleScheduleImage(MultipartFile file) {
         try {
             MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-
             body.add("file", new ByteArrayResource(file.getBytes()) {
                 @Override
                 public String getFilename() {
-                    return file.getOriginalFilename(); // 必须重写这个方法，否则 Python 认不出是文件
+                    return file.getOriginalFilename();
                 }
             });
 
-            // 2. 创建请求实体（不传 headers，让 Spring 自动处理）
             HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body);
-
-            // 3. 发送请求
             RestTemplate restTemplate = new RestTemplate();
-            CourseInfoEntity result = restTemplate.postForObject(
+
+            ScheduleItemEntity result = restTemplate.postForObject(
                     "http://127.0.0.1:5000/api/llm/parse_schedule",
                     requestEntity,
-                    CourseInfoEntity.class
+                    ScheduleItemEntity.class
             );
+
+            if (result != null) {
+                Long currentUserId = 1L;
+                result.setUserId(currentUserId);
+                this.save(result);  // 保存到数据库
+            }
 
             return result;
 
         } catch (IOException e) {
-            // 处理文件读取异常
-            throw new RuntimeException("Failed to read uploaded file", e);
+            throw new RuntimeException("处理课程表图片失败", e);
         }
     }
 }
