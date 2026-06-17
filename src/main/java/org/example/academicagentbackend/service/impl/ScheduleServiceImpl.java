@@ -4,10 +4,13 @@ import com.baomidou.mybatisplus.extension.service.IService;
 import org.example.academicagentbackend.model.ScheduleItemEntity;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.List;
+
 public interface ScheduleServiceImpl extends IService<ScheduleItemEntity> {
 
     /**
      * 处理课程表图片并保存到数据库
+     * 一张课表有多门课,所以返回 List
      */
-    ScheduleItemEntity handleScheduleImage(MultipartFile file);
+    List<ScheduleItemEntity> handleScheduleImage(MultipartFile file);
 }

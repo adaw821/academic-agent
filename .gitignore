@@ -31,3 +31,17 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Python 虚拟环境 / 缓存 ###
+agent/
+**/agent/
+__pycache__/
+*.pyc
+*.pyo
+
+### Chroma 向量库(本地数据,不提交) ###
+chroma_db/
+**/chroma_db/
+
+### Office 临时锁文件 ###
+~$*
