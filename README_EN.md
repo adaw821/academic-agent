@@ -255,12 +255,13 @@ academic-agent-master/
 ## Getting Started
 
 > ⚠️ **This project currently runs locally only. No online deployment has been configured.**
+> ⚠️ **Recommended: Node.js v20 LTS or v22 LTS**. Node.js v24 and other bleeding-edge versions may cause Electron 28 binary download failures.
 
 ### Prerequisites
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| Node.js | 16+ | Run Electron frontend |
+| Node.js | 20 LTS / 22 LTS (recommended) | Run Electron frontend |
 | Java | 17+ | Run Spring Boot backend |
 | Maven | 3.6+ | Build Java project |
 | MySQL | 8.0+ | Data persistence |
@@ -331,6 +332,8 @@ cd electron-app/bnbu-assistant
 npm install
 ```
 
+> ⚠️ If the app fails to start after `npm install` with `Electron failed to install correctly`, the Electron binary (~100 MB) did not download successfully. See [🛠 Electron Download Troubleshooting](#-electron-download-troubleshooting) below.
+
 ### 5. One-Click Launch (Recommended)
 
 ```bash
@@ -368,6 +371,52 @@ npx electron main.js
 ```
 
 > 💡 The frontend degrades gracefully — all UI pages work with local Mock data even without the backend running.
+
+---
+
+### 🛠 Electron Download Troubleshooting
+
+The Electron binary (~100 MB) may fail to download during `npm install` due to network issues. **Try the solutions in order — earlier options are simpler.**
+
+#### Option 1: Retry Install (Simplest)
+
+```bash
+cd electron-app/bnbu-assistant
+rmdir /s /q node_modules
+npm install
+```
+
+If it fails the first time, run `npm install` again in the **same terminal window** — it usually succeeds on the second attempt.
+
+#### Option 2: Use China Mirror for Faster Download
+
+```bash
+cd electron-app/bnbu-assistant
+set ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/
+npm install
+```
+
+#### Option 3: Manual Electron Binary Download (Last Resort)
+
+If all else fails, manually download and extract the Electron binary:
+
+```bash
+cd electron-app/bnbu-assistant
+
+# 1. Install npm packages only (skip binary download)
+npm install electron --ignore-scripts
+
+# 2. Download Electron 28.0.0 manually (~100 MB, wait for it to finish)
+powershell -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri 'https://npmmirror.com/mirrors/electron/v28.0.0/electron-v28.0.0-win32-x64.zip' -OutFile 'node_modules\electron\dist\electron.zip'"
+
+# 3. Extract
+powershell -ExecutionPolicy Bypass -Command "Expand-Archive -Path 'node_modules\electron\dist\electron.zip' -DestinationPath 'node_modules\electron\dist' -Force"
+
+# 4. Verify — electron.exe should appear
+dir node_modules\electron\dist\electron.exe
+```
+
+Once `electron.exe` is confirmed, double-click `start.bat` to launch the app.
 
 ---
 
@@ -474,4 +523,4 @@ Final Year Project (FYP). For academic and learning purposes only.
 
 ---
 
-> Last updated: 2026-06-16
+> Last updated: 2026-06-18

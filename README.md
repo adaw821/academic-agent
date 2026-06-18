@@ -256,12 +256,13 @@ academic-agent-master/
 ## 快速开始
 
 > ⚠️ **注意：本项目目前仅支持本地运行，尚未部署至任何线上环境。**
+> ⚠️ **推荐使用 Node.js v20 LTS 或 v22 LTS**。Node.js v24 等过新版本可能导致 Electron 28 二进制包下载失败。
 
 ### 前置要求
 
 | 工具 | 版本要求 | 用途 |
 |------|---------|------|
-| Node.js | 16+ | 运行 Electron 前端 |
+| Node.js | 20 LTS / 22 LTS（推荐） | 运行 Electron 前端 |
 | Java | 17+ | 运行 Spring Boot 后端 |
 | Maven | 3.6+ | 构建 Java 项目 |
 | MySQL | 8.0+ | 数据持久化 |
@@ -371,6 +372,8 @@ cd electron-app/bnbu-assistant
 npm install
 ```
 
+> ⚠️ 如果 `npm install` 后无法启动，报 `Electron failed to install correctly`，说明 Electron 二进制包（约 100MB）下载失败。请按下方 [🛠 Electron 下载失败的处理方案](#-electron-下载失败的处理方案) 操作。
+
 ### 5. 一键启动（推荐）
 
 ```bash
@@ -408,6 +411,52 @@ npx electron main.js
 ```
 
 > 💡 前端有完整的降级策略：即使 Spring Boot 和 OCR 服务均未启动，Electron 前端也能用本地 Mock 数据正常演示所有界面。
+
+---
+
+### 🛠 Electron 下载失败的处理方案
+
+`npm install` 过程中 Electron 的二进制包（约 100MB）可能因网络问题下载失败。**请按以下顺序尝试，优先使用前面的方案。**
+
+#### 方案一：重试安装（最简单）
+
+```bash
+cd electron-app/bnbu-assistant
+rmdir /s /q node_modules
+npm install
+```
+
+如果第一次失败，在**同一个命令行窗口**中再执行一次 `npm install`——第二次通常能成功。
+
+#### 方案二：使用国内镜像加速
+
+```bash
+cd electron-app/bnbu-assistant
+set ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/
+npm install
+```
+
+#### 方案三：手动下载 Electron 二进制（最终兜底方案）
+
+如果以上方案均失败，按以下步骤手动操作：
+
+```bash
+cd electron-app/bnbu-assistant
+
+# 1. 先安装 npm 包（跳过二进制下载）
+npm install electron --ignore-scripts
+
+# 2. 手动下载 Electron 28.0.0（约 100MB，需等待下载完成）
+powershell -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri 'https://npmmirror.com/mirrors/electron/v28.0.0/electron-v28.0.0-win32-x64.zip' -OutFile 'node_modules\electron\dist\electron.zip'"
+
+# 3. 解压
+powershell -ExecutionPolicy Bypass -Command "Expand-Archive -Path 'node_modules\electron\dist\electron.zip' -DestinationPath 'node_modules\electron\dist' -Force"
+
+# 4. 验证：看到 electron.exe 即表示安装成功
+dir node_modules\electron\dist\electron.exe
+```
+
+验证通过后，双击 `start.bat` 即可启动应用。
 
 ---
 
@@ -584,4 +633,4 @@ npx electron main.js
 
 ---
 
-> 更新时间：2026-06-16
+> 更新时间：2026-06-18
