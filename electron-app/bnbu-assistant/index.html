@@ -121,8 +121,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC"
     </div>
     <div class="flex items-center gap-5">
       <span class="text-2xl font-extrabold text-error tabular-nums">剩余 {{ urgentCountdownText }}</span>
-      <button @click="dismissUrgent" class="text-on-surface-variant hover:text-error p-2 rounded-full hover:bg-error/5 transition-colors">
-        <span class="material-symbols-outlined">close</span>
+      <button @click="dismissUrgent" class="text-on-surface-variant hover:text-error p-1.5 transition-colors">
+        <span class="material-symbols-outlined text-xl">close</span>
       </button>
     </div>
   </div>
@@ -646,7 +646,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC"
                         <span v-else class="text-xs">{{dayLabel(course.day)}}</span>
                       </td>
                       <td class="py-2.5 px-4 text-center">
-                        <template v-if="course.start_time">
+                        <!-- 多时段合并显示 -->
+                        <template v-if="course.sessions && course.sessions.length > 1">
+                          <div class="space-y-0.5">
+                            <div v-for="(s, si) in course.sessions" :key="si" class="text-xs text-on-surface-variant">{{dayLabel(s.day)}} {{s.start_time}}-{{s.end_time}}</div>
+                          </div>
+                        </template>
+                        <template v-else-if="course.start_time">
                           <span v-if="!course.confirmed" class="text-xs text-on-surface-variant">{{course.start_time}}-{{course.end_time}}</span>
                           <span v-else class="text-xs font-medium text-primary">{{course.start_time}}-{{course.end_time}}</span>
                         </template>
@@ -1457,7 +1463,8 @@ createApp({
         function periodLabel(p) { return periodTimes[p] || '时段'+p; }
 
         async function recognizeSchedule() {
-            if (!scheduleImageData.value) return;
+            console.log('🚀🚀🚀 recognizeSchedule() 被调用了！');
+            if (!scheduleImageData.value) { console.log('❌ 没有图片数据，退出'); return; }
             scheduleOcrRunning.value = true;
             scheduleOcrProgress.value = 5;
             scheduleOcrStatus.value = '检查 OCR 服务连接...';
@@ -1512,15 +1519,65 @@ createApp({
                 scheduleOcrStatus.value = '解析课程信息...';
                 scheduleOcrProgress.value = 90;
 
-                const courses = (data.courses || []).map(c => ({
-                    name: c.name,
-                    day: c.day || 'mon',
-                    period: c.period || 1,
-                    location: c.location || '',
-                    start_time: c.start_time || '',
-                    end_time: c.end_time || '',
-                    confirmed: false
-                }));
+                // ===== DEBUG: 打印 OCR 原始数据 =====
+                console.log('=== OCR 原始返回数据 ===');
+                console.log(JSON.stringify(data.courses, null, 2));
+
+                // 过滤教师名：移除 Dr./Prof. 头衔 + 英文名 + 大写姓氏
+                const stripTeacher = (n) => n.replace(
+                    /\s*(?:Dr\.?|Prof\.?)\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+[A-Z]{2,}\s*/gi,
+                    ' '
+                ).replace(/\s+/g, ' ').trim();
+
+                // Step 1: 过滤 name 为空的条目，但如果 code 不为空就用 code 补齐
+                let courses = (data.courses || []).map(c => {
+                    let name = stripTeacher(c.name);
+                    // 过滤后为空但有 course code → 用 code 当名字
+                    if (!name && c.code) name = c.code;
+                    return { ...c, name };
+                });
+                
+                console.log('=== 过滤教师名后 ===');
+                console.log(courses.map(c => c.name));
+
+                // 备份原始条数（合并前）
+                const beforeFilter = courses.length;
+                courses = courses.filter(c => c.name && c.name.length > 0);
+
+                console.log('=== 去掉空行后(' + beforeFilter + '→' + courses.length + ') ===');
+                console.log(courses.map(c => c.name));
+
+                // Step 2: 合并同名课程（保留不同时间）
+                const byName = new Map();
+                courses.forEach(c => {
+                    const key = c.name;
+                    if (byName.has(key)) {
+                        const existing = byName.get(key);
+                        existing.sessions.push({
+                            day: c.day || 'mon',
+                            period: c.period || 1,
+                            start_time: c.start_time || '',
+                            end_time: c.end_time || ''
+                        });
+                    } else {
+                        byName.set(key, {
+                            name: c.name,
+                            day: c.day || 'mon',
+                            period: c.period || 1,
+                            location: c.location || '',
+                            start_time: c.start_time || '',
+                            end_time: c.end_time || '',
+                            sessions: [{
+                                day: c.day || 'mon',
+                                period: c.period || 1,
+                                start_time: c.start_time || '',
+                                end_time: c.end_time || ''
+                            }],
+                            confirmed: false
+                        });
+                    }
+                });
+                courses = Array.from(byName.values());
 
                 scheduleOcrResults.value = courses;
                 scheduleOcrProgress.value = 100;
@@ -1541,7 +1598,32 @@ createApp({
 
         function confirmScheduleOcr() {
             const confirmed = scheduleOcrResults.value.filter(c => c.confirmed);
-            scheduleCourses.value = [...scheduleCourses.value, ...confirmed];
+            // 展开多时段课程为多个条目
+            const expanded = [];
+            confirmed.forEach(c => {
+                if (c.sessions && c.sessions.length > 1) {
+                    c.sessions.forEach(s => {
+                        expanded.push({
+                            name: c.name,
+                            day: s.day,
+                            period: s.period,
+                            location: c.location,
+                            start_time: s.start_time,
+                            end_time: s.end_time
+                        });
+                    });
+                } else {
+                    expanded.push({
+                        name: c.name,
+                        day: c.day,
+                        period: c.period,
+                        location: c.location,
+                        start_time: c.start_time,
+                        end_time: c.end_time
+                    });
+                }
+            });
+            scheduleCourses.value = [...scheduleCourses.value, ...expanded];
             scheduleOcrResults.value = [];
             scheduleImageData.value = null;
             scheduleImageName.value = '';
@@ -1601,8 +1683,14 @@ createApp({
                         tokens.pop();
                     }
                 }
-                // Remaining tokens form the course name
-                name = tokens.join(' ');
+
+                // ===== 用正则直接从字符串中删除教师名（不依赖 token 拆分）=====
+                let courseText = tokens.join(' ');
+                courseText = courseText.replace(
+                    /\s*(?:Dr\.?|Prof\.?)\s*[A-Z][a-z]*(?:\s+[A-Z][a-z]*)*\s+[A-Z]{2,}\s*/gi,
+                    ' '
+                );
+                name = courseText.replace(/\s+/g, ' ').trim();
                 if (name && day && (timeStr || period)) {
                     results.push({
                         day, period: period || 0, name,

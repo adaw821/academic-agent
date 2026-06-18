@@ -196,7 +196,8 @@ def parse_sections(ocr_text):
                 between = line[code_pos + len(code):time_pos].strip()
                 # Remove category (MR, CORE, etc.) and teacher
                 between = re.sub(r'^\s*(MR|ME|CORE|ELEC|FREE)\s+', '', between, flags=re.I)
-                between = re.sub(r'\s+(Dr|Prof|Mr|Ms)\.?\s*[A-Za-z]+$', '', between, flags=re.I)
+                # 删除完整教师名：Dr./Prof./Mr./Ms. + 英文名 + 大写姓氏（如 "Dr.Welpeng ZHOU"）
+                between = re.sub(r'\s*(?:Dr|Prof|Mr|Ms)\.?\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+[A-Z]{2,}\s*', ' ', between, flags=re.I)
                 between = ' '.join(between.split()).strip()  # Normalize whitespace
                 if len(between) > 3:
                     name = between
@@ -209,6 +210,8 @@ def parse_sections(ocr_text):
             name_line = code_re.sub('', name_line)
             name_line = room_re.sub('', name_line)
             name_line = teacher_re.sub('', name_line)
+            # 额外清理教师姓氏（大写字母串，跟在头衔后面的）
+            name_line = re.sub(r'\s+[A-Z]{2,}\b', '', name_line)
             name_line = re.sub(r'\b\d+\.?\d*\b', '', name_line)
             name_line = re.sub(r'\b(MR|ME|CORE|ELEC|FREE)\b', '', name_line, flags=re.I)
             name_line = ' '.join(name_line.split()).strip()
@@ -271,7 +274,7 @@ def parse_sections(ocr_text):
             'location': room
         })
         
-        print(f'[Parser] Found: {name} @ {day} {start}-{end} in {room}')
+        print(f'[Parser] Found: {name} @ {day} {start}-{end} in {room} (teacher: {teacher})')
     
     # Step 3: Build final results (one record per course, with all time slots)
     for key, course in courses.items():
@@ -335,6 +338,8 @@ def parse_timetable(text):
     def cn(r):
         s = rr.sub('', r.strip()); s = re.sub(r'\d:\d[-–—]\d:\d','',s); s = re.sub(r'\b\d{4}\b','',s)
         s = re.sub(r'\(100[12]\)','',s); s = re.sub(r'\b(Workshop|Perspective|Semester)\b','',s,re.I)
+        # 删除教师名：Dr./Prof./Mr./Ms. + 英文名 + 大写姓氏
+        s = re.sub(r'\s*(?:Dr|Prof|Mr|Ms)\.?\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+[A-Z]{2,}\s*', ' ', s, flags=re.I)
         s = ' '.join(s.split()).strip().strip('–— ()[]（）.,;:/')
         p = s.split()
         while len(p)>1 and len(p[0])<=2: p=p[1:]

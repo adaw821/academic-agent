@@ -18,7 +18,9 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8766 " ^| findstr "LISTENIN
 timeout /t 2 /nobreak >nul
 
 echo [1/2] Starting OCR Server on port 8766...
-start "BNBU-OCR" C:\Users\DELL\.workbuddy\binaries\python\versions\3.13.12\python.exe ocr_server.py
+:: 自动查找 Python（兼容不同电脑）
+where py >nul 2>&1 && set PY=py || set PY=python
+start "BNBU-OCR" %PY% ocr_server.py
 
 timeout /t 3 /nobreak >nul
 
