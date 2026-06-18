@@ -1,33 +1,33 @@
-HELP.md
-target/
-.mvn/wrapper/maven-wrapper.jar
-!**/src/main/**/target/
-!**/src/test/**/target/
+# Dependencies
+node_modules/
 
-### STS ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
-.sts4-cache
+# Python
+__pycache__/
+*.pyc
+*.pyo
 
-### IntelliJ IDEA ###
-.idea
-*.iws
-*.iml
-*.ipr
+# Logs
+*.log
+electron_err.log
+ocr_debug_output.txt
 
-### NetBeans ###
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
-build/
-!**/src/main/**/build/
-!**/src/test/**/build/
+# WorkBuddy
+.workbuddy/
+.codebuddy/
 
-### VS Code ###
-.vscode/
+# Debug/test files
+test-blank.html
+check_js.js
+find_issue.js
+find_detail.js
+compare_braces.js
+trace_braces.js
+_temp_script.js
+_raw_script.js
+index_new.html
+index_old_from_code.html
+nul
+
+# OS
+.DS_Store
+Thumbs.db

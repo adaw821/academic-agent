@@ -1,0 +1,2237 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>BNBU AI · 智能学术助手</title>
+<!-- Local dependencies (offline-ready, no CDN required) -->
+<script src="vendor/vue.global.prod.js"></script>
+<link rel="stylesheet" href="vendor/tailwind.css">
+<link rel="stylesheet" href="vendor/material-symbols.css">
+<style>
+/* System font stack replacing Google Fonts */
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif; }
+</style>
+<style>
+  .material-symbols-outlined {
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+    vertical-align: middle;
+    font-size: inherit;
+  }
+  .glass-panel {
+    background: rgba(255, 255, 255, 0.7);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(229, 229, 229, 0.5);
+  }
+  .glass-card {
+    background: rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(229, 229, 229, 0.4);
+  }
+  body {
+    background-color: #fcf8fb;
+    color: #1b1b1d;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  .scrollbar-hide::-webkit-scrollbar { display: none; }
+  .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: #e4e2e4; border-radius: 10px; }
+  .chat-bubble-ai { background: rgba(240, 237, 239, 0.8); backdrop-filter: blur(10px); }
+  
+  /* Pulse animations */
+  @keyframes pulse-ring {
+    0% { transform: scale(.8); opacity: 0.5; }
+    50% { transform: scale(1.2); opacity: 0.2; }
+    100% { transform: scale(.8); opacity: 0.5; }
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-6px); }
+  }
+  @keyframes pulse-text {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+  }
+  @keyframes dash {
+    to { stroke-dashoffset: -1000; }
+  }
+  .animate-float { animation: float 3s ease-in-out infinite; }
+  .animate-pulse-text { animation: pulse-text 1.2s infinite; }
+  .path-line { stroke-dasharray: 8; animation: dash 20s linear infinite; }
+  .progress-bg {
+    background-image: radial-gradient(#004d7e10 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  
+  /* Loading dots */
+  @keyframes dotPulse { 0%,100%{opacity:0.2;} 50%{opacity:1;} }
+  .typing-dots span { animation: dotPulse 1.4s infinite; }
+  .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+  /* Transition helpers */
+  .sidebar-transition { transition: all 0.2s ease; }
+  
+  /* Form inputs */
+  input:focus, textarea:focus, select:focus { outline: none; }
+  
+  .urgent-float {
+    animation: pulse-text 1s infinite;
+  }
+
+  /* Class Reminder Popup Animations */
+  .reminder-popup-enter-active {
+    transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  .reminder-popup-leave-active {
+    transition: all 0.3s ease-in;
+  }
+  .reminder-popup-enter-from {
+    opacity: 0;
+    transform: scale(0.8) translateY(20px);
+  }
+  .reminder-popup-leave-to {
+    opacity: 0;
+    transform: scale(0.9) translateY(-10px);
+  }
+  @keyframes bounce-in {
+    0% { transform: scale(0.5); opacity: 0; }
+    50% { transform: scale(1.05); }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  .animate-bounce-in {
+    animation: bounce-in 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+</style>
+</head>
+<body class="overflow-hidden h-screen">
+<div id="app" class="h-full">
+  <!-- ====== URGENT DDL FLOATING BAR ====== -->
+  <div v-if="activeUrgentDdl && !urgentDismissed" class="fixed top-0 left-0 right-0 z-[999] bg-white/92 backdrop-blur-xl border-b-2 border-red-400/50 px-8 py-4 flex items-center justify-between gap-4 shadow-lg shadow-red-500/5">
+    <div class="flex items-center gap-4">
+      <span class="material-symbols-outlined text-3xl text-error urgent-float">emergency</span>
+      <div>
+        <div class="font-bold text-error text-base">{{ activeUrgentDdl.title }}</div>
+        <div class="text-xs text-on-surface-variant">截止时间：{{ activeUrgentDdl.dueDate }}</div>
+      </div>
+    </div>
+    <div class="flex items-center gap-5">
+      <span class="text-2xl font-extrabold text-error tabular-nums">剩余 {{ urgentCountdownText }}</span>
+      <button @click="dismissUrgent" class="text-on-surface-variant hover:text-error p-2 rounded-full hover:bg-error/5 transition-colors">
+        <span class="material-symbols-outlined">close</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- ====== CLASS REMINDER POPUP (上课提醒弹窗) ====== -->
+  <Transition name="reminder-popup">
+    <div v-if="classReminder.show" class="fixed inset-0 z-[1000] flex items-center justify-center" @click.self="dismissClassReminder">
+      <!-- Backdrop -->
+      <div class="absolute inset-0 bg-black/40 backdrop-blur-sm"></div>
+      
+      <!-- Modal Card -->
+      <div class="relative bg-white rounded-3xl shadow-2xl max-w-md w-[90%] overflow-hidden animate-bounce-in">
+        <!-- Header with gradient -->
+        <div class="bg-gradient-to-r from-primary to-primary/80 px-6 py-5 flex items-center gap-4">
+          <div class="w-14 h-14 rounded-2xl bg-white/20 backdrop-blur flex items-center justify-center flex-shrink-0">
+            <span class="material-symbols-outlined text-3xl text-white">school</span>
+          </div>
+          <div class="text-white">
+            <div class="text-lg font-bold">📢 上课提醒</div>
+            <div class="text-sm text-white/80">{{ classReminder.countdown }}</div>
+          </div>
+        </div>
+        
+        <!-- Course Info -->
+        <div class="p-6 space-y-4">
+          <div class="flex items-start gap-4">
+            <div class="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+              <span class="material-symbols-outlined text-primary text-xl">book</span>
+            </div>
+            <div>
+              <div class="text-xs text-on-surface-variant uppercase tracking-wider font-medium mb-1">课程名称</div>
+              <div class="text-lg font-bold text-on-surface leading-tight">{{ classReminder.courseName }}</div>
+            </div>
+          </div>
+          
+          <div class="grid grid-cols-2 gap-3">
+            <div class="bg-surface-container rounded-2xl p-4">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="material-symbols-outlined text-base text-on-surface-variant">location_on</span>
+                <span class="text-xs text-on-surface-variant font-medium">教室</span>
+              </div>
+              <div class="text-base font-bold text-primary tabular-nums">{{ classReminder.room }}</div>
+            </div>
+            <div class="bg-surface-container rounded-2xl p-4">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="material-symbols-outlined text-base text-on-surface-variant">schedule</span>
+                <span class="text-xs text-on-surface-variant font-medium">时间</span>
+              </div>
+              <div class="text-sm font-semibold text-on-surface">{{ classReminder.time }}</div>
+            </div>
+          </div>
+          
+          <!-- Action buttons -->
+          <div class="flex gap-3 pt-2">
+            <button @click="dismissClassReminder" class="flex-1 py-3 px-4 bg-surface-container rounded-xl text-sm font-medium text-on-surface-variant hover:bg-surface-container-high transition-colors">
+              稍后提醒
+            </button>
+            <button @click="dismissClassReminder" class="flex-1 py-3 px-4 bg-primary text-white rounded-xl text-sm font-semibold hover:brightness-110 transition-all shadow-md shadow-primary/20">
+              我知道了 ✅
+            </button>
+          </div>
+        </div>
+        
+        <!-- Progress bar (visual countdown) -->
+        <div class="h-1.5 bg-surface-container overflow-hidden">
+          <div class="h-full bg-gradient-to-r from-orange-400 to-red-500 w-[2/3] animate-pulse"></div>
+        </div>
+      </div>
+    </div>
+  </Transition>
+
+  <div class="flex h-full" :style="(activeUrgentDdl && !urgentDismissed) ? {paddingTop:'68px'} : {}">
+    <!-- ====== SIDEBAR (280px, frosted glass) ====== -->
+    <aside class="flex flex-col h-full fixed left-0 top-0 bg-surface-container-low/70 backdrop-blur-xl w-sidebar_width border-r border-outline-variant z-50" :style="(activeUrgentDdl && !urgentDismissed) ? {paddingTop:'68px'} : {}">
+      <div class="p-gutter flex items-center gap-3 mb-6">
+        <div class="w-9 h-9 rounded-lg bg-primary-container flex items-center justify-center overflow-hidden shadow-sm flex-shrink-0">
+          <img src="assets/agent-avatar.jpg" alt="BNBU" class="w-full h-full object-cover">
+        </div>
+        <div>
+          <h1 class="font-headline-md font-bold text-primary leading-tight text-lg">BNBU AI</h1>
+          <p class="font-body-sm text-on-surface-variant/60 text-xs">Academic Assistant</p>
+        </div>
+      </div>
+      <div class="px-4 mb-5">
+        <button @click="switchView('chat'); newChat()" class="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-primary text-on-primary rounded-xl font-label-md transition-all active:scale-95 shadow-md shadow-primary/20 hover:brightness-110">
+          <span class="material-symbols-outlined">add</span> 新建对话
+        </button>
+      </div>
+      <nav class="flex-1 overflow-y-auto px-4 space-y-1 scrollbar-hide">
+        <a @click="switchView('home')" class="flex items-center gap-3 px-4 py-2.5 rounded-xl transition-colors cursor-pointer" :class="activeView==='home' ? 'bg-primary/10 text-primary border-l-4 border-primary' : 'text-on-surface-variant hover:bg-surface-container-high'">
+          <span class="material-symbols-outlined">dashboard</span>
+          <span class="font-label-md">学术主页</span>
+        </a>
+        <a @click="switchView('chat')" class="flex items-center gap-3 px-4 py-2.5 rounded-xl transition-colors cursor-pointer" :class="activeView==='chat' ? 'bg-primary/10 text-primary border-l-4 border-primary' : 'text-on-surface-variant hover:bg-surface-container-high'">
+          <span class="material-symbols-outlined">chat_bubble</span>
+          <span class="font-label-md">AI 对话</span>
+        </a>
+        <a @click="switchView('ddl')" class="flex items-center gap-3 px-4 py-2.5 rounded-xl transition-colors cursor-pointer relative" :class="activeView==='ddl' ? 'bg-primary/10 text-primary border-l-4 border-primary' : 'text-on-surface-variant hover:bg-surface-container-high'">
+          <span class="material-symbols-outlined">timer</span>
+          <span class="font-label-md">DDL 提醒</span>
+          <span v-if="urgentTotal>0" class="absolute right-2 top-1/2 -translate-y-1/2 bg-error text-white text-[10px] font-bold rounded-full px-1.5 py-0.5 min-w-[20px] text-center shadow-sm shadow-error/30">{{urgentTotal}}</span>
+          <span v-else-if="warnTotal>0" class="absolute right-2 top-1/2 -translate-y-1/2 bg-orange-500 text-white text-[10px] font-bold rounded-full px-1.5 py-0.5 min-w-[20px] text-center shadow-sm shadow-orange-500/30">{{warnTotal}}</span>
+        </a>
+        <a @click="switchView('schedule')" class="flex items-center gap-3 px-4 py-2.5 rounded-xl transition-colors cursor-pointer" :class="activeView==='schedule' ? 'bg-primary/10 text-primary border-l-4 border-primary' : 'text-on-surface-variant hover:bg-surface-container-high'">
+          <span class="material-symbols-outlined">calendar_month</span>
+          <span class="font-label-md">课程表</span>
+        </a>
+        <a @click="switchView('gpa')" class="flex items-center gap-3 px-4 py-2.5 rounded-xl transition-colors cursor-pointer" :class="activeView==='gpa' ? 'bg-primary/10 text-primary border-l-4 border-primary' : 'text-on-surface-variant hover:bg-surface-container-high'">
+          <span class="material-symbols-outlined">trending_up</span>
+          <span class="font-label-md">GPA 计算</span>
+        </a>
+        <a @click="switchView('reviews')" class="flex items-center gap-3 px-4 py-2.5 rounded-xl transition-colors cursor-pointer" :class="activeView==='reviews' ? 'bg-primary/10 text-primary border-l-4 border-primary' : 'text-on-surface-variant hover:bg-surface-container-high'">
+          <span class="material-symbols-outlined">reviews</span>
+          <span class="font-label-md">课程评价</span>
+        </a>
+        <a @click="switchView('email')" class="flex items-center gap-3 px-4 py-2.5 rounded-xl transition-colors cursor-pointer" :class="activeView==='email' ? 'bg-primary/10 text-primary border-l-4 border-primary' : 'text-on-surface-variant hover:bg-surface-container-high'">
+          <span class="material-symbols-outlined">mail</span>
+          <span class="font-label-md">邮件摘要</span>
+        </a>
+        <a @click="switchView('platforms')" class="flex items-center gap-3 px-4 py-2.5 rounded-xl transition-colors cursor-pointer" :class="activeView==='platforms' ? 'bg-primary/10 text-primary border-l-4 border-primary' : 'text-on-surface-variant hover:bg-surface-container-high'">
+          <span class="material-symbols-outlined">link</span>
+          <span class="font-label-md">平台入口</span>
+        </a>
+      </nav>
+      <div class="p-4 border-t border-outline-variant flex flex-col gap-1">
+        <button @click="showAddPlatform=true" class="w-full text-left flex items-center gap-3 px-4 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high transition-colors">
+          <span class="material-symbols-outlined">add_circle</span>
+          <span class="font-label-md text-sm">添加平台</span>
+        </button>
+        <div class="mt-2 flex items-center gap-3 px-4 py-2">
+          <div class="w-8 h-8 rounded-full bg-primary-container overflow-hidden flex-shrink-0">
+            <img src="assets/user-avatar.png" alt="用户" class="w-full h-full object-cover">
+          </div>
+          <div class="flex flex-col">
+            <span class="font-label-md font-bold text-sm">李明</span>
+            <span class="text-[10px] uppercase tracking-wider text-on-surface-variant/50">CS · 2023级</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ====== MAIN CONTENT ====== -->
+    <div class="flex-1 ml-sidebar_width flex flex-col h-full overflow-hidden">
+      <!-- TOP BAR -->
+      <header v-if="activeView!=='chat'" class="flex justify-between items-center w-full px-gutter h-16 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0 z-40 shrink-0" :style="(activeUrgentDdl && !urgentDismissed) ? {top:'68px'} : {top:0}">
+        <div class="flex items-center gap-4">
+          <h2 class="font-headline-md text-on-surface font-semibold text-xl">
+            <span v-if="activeView==='home'">学术主页</span>
+            <span v-if="activeView==='schedule'">课程表</span>
+            <span v-if="activeView==='ddl'">DDL 提醒</span>
+            <span v-if="activeView==='gpa'">GPA 计算器</span>
+            <span v-if="activeView==='reviews'">课程评价</span>
+            <span v-if="activeView==='email'">邮件摘要</span>
+            <span v-if="activeView==='platforms'">平台入口</span>
+          </h2>
+          <div class="h-6 w-px bg-outline-variant"></div>
+          <span class="font-label-sm text-primary bg-primary/5 px-3 py-1 rounded-full text-xs">BNBU · UIC</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <button class="w-10 h-10 rounded-full flex items-center justify-center hover:bg-surface-container-high text-on-surface-variant transition-colors">
+            <span class="material-symbols-outlined">notifications</span>
+          </button>
+          <button class="w-10 h-10 rounded-full flex items-center justify-center hover:bg-surface-container-high text-on-surface-variant transition-colors">
+            <span class="material-symbols-outlined">account_circle</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- SCROLLABLE CONTENT AREA -->
+      <div class="flex-1 flex overflow-hidden">
+        <!-- Center content -->
+        <section class="flex-1 overflow-y-auto scrollbar-thin" :class="activeView==='chat' ? '' : 'p-margin_page'">
+
+          <!-- ═══════ HOME: Academic Hub ═══════ -->
+          <div v-if="activeView==='home'" class="max-w-4xl">
+            <!-- Header -->
+            <div class="mb-10">
+              <h2 class="font-display-lg text-on-surface text-4xl font-bold tracking-tight">学术主页</h2>
+              <p class="font-body-md text-on-surface-variant mt-1">欢迎回来，随时掌握你的学业动态。</p>
+            </div>
+            <!-- Quick Links -->
+            <div class="mb-12">
+              <h3 class="font-headline-md text-on-surface text-xl font-semibold mb-5">快捷入口</h3>
+              <div class="grid grid-cols-3 gap-5">
+                <div @click="openUrl('https://ispace.uic.edu.cn')" class="glass-panel p-5 rounded-3xl hover:shadow-xl transition-all cursor-pointer overflow-hidden relative group">
+                  <div class="absolute -right-4 -top-4 w-16 h-16 bg-primary/5 rounded-full group-hover:scale-150 transition-transform duration-500"></div>
+                  <span class="material-symbols-outlined text-primary text-3xl mb-3 block">book_online</span>
+                  <h4 class="font-label-md text-on-surface text-sm font-semibold">iSpace</h4>
+                  <p class="font-body-sm text-on-surface-variant/60 text-xs mt-0.5">作业提交 & 课程资料</p>
+                </div>
+                <div @click="openUrl('https://mis.uic.edu.cn/mis/login.jsp?login_error=3')" class="glass-panel p-5 rounded-3xl hover:shadow-xl transition-all cursor-pointer overflow-hidden relative group">
+                  <div class="absolute -right-4 -top-4 w-16 h-16 bg-primary/5 rounded-full group-hover:scale-150 transition-transform duration-500"></div>
+                  <span class="material-symbols-outlined text-primary text-3xl mb-3 block">badge</span>
+                  <h4 class="font-label-md text-on-surface text-sm font-semibold">UIC MIS</h4>
+                  <p class="font-body-sm text-on-surface-variant/60 text-xs mt-0.5">选课 & 学籍管理</p>
+                </div>
+                <div @click="openUrl('https://lrc.bnbu.edu.cn/')" class="glass-panel p-5 rounded-3xl hover:shadow-xl transition-all cursor-pointer overflow-hidden relative group">
+                  <div class="absolute -right-4 -top-4 w-16 h-16 bg-primary/5 rounded-full group-hover:scale-150 transition-transform duration-500"></div>
+                  <span class="material-symbols-outlined text-primary text-3xl mb-3 block">local_library</span>
+                  <h4 class="font-label-md text-on-surface text-sm font-semibold">学习资源中心</h4>
+                  <p class="font-body-sm text-on-surface-variant/60 text-xs mt-0.5">LRC 图书馆</p>
+                </div>
+              </div>
+            </div>
+            <!-- Schedule Preview -->
+            <div class="mb-8">
+              <div class="flex justify-between items-end mb-5">
+                <h3 class="font-headline-md text-on-surface text-xl font-semibold">本周课程</h3>
+                <button @click="switchView('schedule')" class="text-primary font-label-md text-sm hover:underline">完整课表 →</button>
+              </div>
+              <div class="space-y-3">
+                <div v-for="slot in timeSlots" :key="slot.time" class="glass-panel rounded-2xl overflow-hidden">
+                  <div class="grid grid-cols-6">
+                    <div class="py-3 px-4 bg-surface-container font-label-sm text-on-surface-variant text-xs">{{slot.time}}</div>
+                    <div v-for="day in ['mon','tue','wed','thu','fri']" :key="day" class="py-3 px-3 border-l border-outline-variant/30">
+                      <div v-for="c in getCoursesAt(day, slot.period)" :key="c.name" class="bg-primary/5 rounded-lg px-2 py-1 text-xs text-primary font-medium mb-0.5">
+                        {{c.name}}<br><span class="text-[10px] text-on-surface-variant/50">{{c.location}}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Quick Actions -->
+            <div class="flex gap-3 mb-8">
+              <button @click="showScheduleParser=true" class="px-5 py-2.5 bg-white border border-outline-variant rounded-full font-label-sm text-on-surface-variant hover:border-primary hover:text-primary transition-all flex items-center gap-2 shadow-sm">
+                <span class="material-symbols-outlined text-lg">edit_note</span> 录入课表
+              </button>
+              <button @click="showAddDdl=true" class="px-5 py-2.5 bg-primary text-white rounded-full font-label-sm hover:brightness-110 transition-all flex items-center gap-2 shadow-sm shadow-primary/20">
+                <span class="material-symbols-outlined text-lg">add</span> 添加 DDL
+              </button>
+              <button @click="switchView('ddl')" class="px-5 py-2.5 bg-white border border-outline-variant rounded-full font-label-sm text-on-surface-variant hover:border-primary hover:text-primary transition-all flex items-center gap-2 shadow-sm">
+                <span class="material-symbols-outlined text-lg">schedule</span> 查看全部 {{allDdlCount}} 条 DDL
+              </button>
+            </div>
+          </div>
+
+          <!-- ═══════ CHAT: AI Conversation ═══════ -->
+          <div v-if="activeView==='chat'" class="flex flex-1 h-full overflow-hidden">
+            <!-- Chat main area -->
+            <div class="flex-1 flex flex-col min-w-0 bg-surface">
+              <!-- Welcome screen -->
+              <div v-if="chatMessages.length <= 1 && !isTyping" class="flex-1 flex flex-col items-center justify-center px-8 text-center">
+                <div class="w-24 h-24 mb-6 animate-float rounded-2xl overflow-hidden shadow-lg">
+                  <img src="assets/agent-avatar.jpg" alt="BNBU AI" class="w-full h-full object-cover">
+                </div>
+                <h2 class="font-display-lg text-primary text-3xl font-bold tracking-tight mb-2">BNBU 智能学习助手</h2>
+                <p class="font-body-md text-on-surface-variant mb-10 max-w-md leading-relaxed">你的专属校园智能伙伴 — 课表、DDL、GPA、选课、邮件……一切学习事务，随问随答。</p>
+                <div class="flex flex-wrap gap-3 justify-center max-w-lg">
+                  <button @click="quickAsk('帮我查看明天的课表')" class="glass-panel px-5 py-3 rounded-2xl font-body-sm text-on-surface-variant hover:text-primary hover:border-primary/30 transition-all">
+                    <span class="material-symbols-outlined text-primary mr-2 text-lg">calendar_today</span>帮我查看明天的课表
+                  </button>
+                  <button @click="quickAsk('最近有什么DDL要截止了？')" class="glass-panel px-5 py-3 rounded-2xl font-body-sm text-on-surface-variant hover:text-primary hover:border-primary/30 transition-all">
+                    <span class="material-symbols-outlined text-error mr-2 text-lg">timer</span>最近有什么DDL要截止了？
+                  </button>
+                  <button @click="quickAsk('开学选课有什么建议？')" class="glass-panel px-5 py-3 rounded-2xl font-body-sm text-on-surface-variant hover:text-primary hover:border-primary/30 transition-all">
+                    <span class="material-symbols-outlined text-amber-500 mr-2 text-lg">tips_and_updates</span>开学选课有什么建议？
+                  </button>
+                  <button @click="quickAsk('怎么查看GPA？')" class="glass-panel px-5 py-3 rounded-2xl font-body-sm text-on-surface-variant hover:text-primary hover:border-primary/30 transition-all">
+                    <span class="material-symbols-outlined text-primary mr-2 text-lg">trending_up</span>怎么查看GPA？
+                  </button>
+                  <button @click="quickAsk('请假流程是怎样的？')" class="glass-panel px-5 py-3 rounded-2xl font-body-sm text-on-surface-variant hover:text-primary hover:border-primary/30 transition-all">
+                    <span class="material-symbols-outlined text-on-surface-variant mr-2 text-lg">description</span>请假流程是怎样的？
+                  </button>
+                  <button @click="quickAsk('图书馆怎么预约座位？')" class="glass-panel px-5 py-3 rounded-2xl font-body-sm text-on-surface-variant hover:text-primary hover:border-primary/30 transition-all">
+                    <span class="material-symbols-outlined text-green-600 mr-2 text-lg">menu_book</span>图书馆怎么预约座位？
+                  </button>
+                </div>
+              </div>
+              <!-- Chat messages -->
+              <div v-else class="flex-1 overflow-y-auto px-gutter py-6 scrollbar-thin space-y-stack_gap_md relative"
+                   @dragover.prevent="chatDragOver=true"
+                   @dragleave.prevent="chatDragOver=false"
+                   @drop.prevent="handleChatDrop"
+                   ref="chatBox">
+                <!-- Drag Overlay -->
+                <div v-if="chatDragOver" class="absolute inset-0 z-20 bg-primary/5 backdrop-blur-sm border-2 border-dashed border-primary rounded-2xl flex items-center justify-center">
+                  <div class="text-center">
+                    <span class="material-symbols-outlined text-primary text-6xl mb-3 block">cloud_upload</span>
+                    <p class="text-primary font-bold text-lg">释放以发送文件</p>
+                    <p class="text-xs text-on-surface-variant/50 mt-1">支持图片 · 文档 · PDF</p>
+                  </div>
+                </div>
+                <div v-for="(msg,idx) in chatMessages" :key="idx" class="flex gap-4" :class="msg.role==='user' ? 'justify-end' : 'items-start'">
+                  <div v-if="msg.role==='assistant'" class="w-8 h-8 rounded-lg overflow-hidden flex-shrink-0">
+                    <img src="assets/agent-avatar.jpg" alt="BNBU" class="w-full h-full object-cover">
+                  </div>
+                  <div class="max-w-[75%]" :class="msg.role==='user' ? 'bg-primary text-on-primary rounded-2xl rounded-tr-none' : 'chat-bubble-ai rounded-2xl rounded-tl-none border border-outline-variant/30'">
+                    <div v-if="msg.sources" class="text-[10px] text-on-surface-variant/50 px-4 pt-3 pb-0">📚 来源：{{msg.sources}}</div>
+                    <!-- Image attachment -->
+                    <img v-if="msg.image" :src="msg.image" class="max-w-full max-h-48 rounded-lg object-contain" :class="msg.content ? 'mx-4 mt-3 mb-0' : 'm-4'">
+                    <div v-if="msg.content" class="p-4 text-body-sm leading-relaxed whitespace-pre-wrap">{{msg.content}}</div>
+                    <!-- File attachment -->
+                    <div v-if="msg.file" class="p-3 flex items-center gap-2 text-sm bg-white/20 rounded-lg" :class="msg.content ? 'mx-4 mb-3' : 'm-4'">
+                      <span class="material-symbols-outlined text-lg">attach_file</span>
+                      <span class="truncate">{{msg.file.name}}</span>
+                    </div>
+                  </div>
+                  <div v-if="msg.role==='user'" class="w-8 h-8 rounded-full overflow-hidden flex-shrink-0">
+                    <img src="assets/user-avatar.png" alt="我" class="w-full h-full object-cover">
+                  </div>
+                </div>
+                <div v-if="isTyping" class="flex gap-4 items-start">
+                  <div class="w-8 h-8 rounded-lg overflow-hidden flex-shrink-0">
+                    <img src="assets/agent-avatar.jpg" alt="BNBU" class="w-full h-full object-cover">
+                  </div>
+                  <div class="chat-bubble-ai rounded-2xl rounded-tl-none border border-outline-variant/30 px-5 py-3 typing-dots">
+                    <span class="text-on-surface-variant/50">●</span>
+                    <span class="text-on-surface-variant/50">●</span>
+                    <span class="text-on-surface-variant/50">●</span>
+                  </div>
+                </div>
+              </div>
+              <!-- Chat Input -->
+              <div class="p-gutter pt-0 shrink-0">
+                <!-- Pending attachments preview -->
+                <div v-if="chatAttachments.length>0" class="flex gap-2 mb-2 flex-wrap">
+                  <div v-for="(att,idx) in chatAttachments" :key="idx" class="relative group flex-shrink-0">
+                    <img v-if="att.type==='image'" :src="att.dataUrl" class="h-16 w-16 rounded-xl object-cover border border-outline-variant/30">
+                    <div v-else class="h-16 w-16 rounded-xl bg-surface-container border border-outline-variant/30 flex items-center justify-center">
+                      <span class="material-symbols-outlined text-on-surface-variant/40 text-2xl">description</span>
+                    </div>
+                    <button @click="removeChatAttachment(idx)" class="absolute -top-1.5 -right-1.5 w-5 h-5 bg-error text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm">
+                      <span class="material-symbols-outlined text-xs">close</span>
+                    </button>
+                    <span class="text-[8px] text-on-surface-variant/50 block truncate w-16 text-center mt-0.5">{{att.name.length>6 ? att.name.slice(0,5)+'…' : att.name}}</span>
+                  </div>
+                </div>
+                <div class="relative glass-panel rounded-2xl p-2 shadow-xl border-white/50 flex items-center gap-2">
+                  <button @click="triggerChatFileInput" class="p-2 rounded-xl text-on-surface-variant/50 hover:text-primary hover:bg-primary/5 transition-colors flex-shrink-0" title="上传文件/图片">
+                    <span class="material-symbols-outlined">attach_file</span>
+                  </button>
+                  <input v-model="currentQuestion" @keyup.enter="sendMessage" class="flex-1 bg-transparent border-none text-body-md placeholder-on-surface-variant/50 py-2 px-1 outline-none" placeholder="问 BNBU AI 任何关于学业的问题…" type="text">
+                  <input type="file" id="chatFileInput" style="display:none" accept="image/*,.pdf,.doc,.docx,.txt,.xlsx,.pptx" @change="handleChatFileSelect" multiple>
+                  <button @click="sendMessage" :disabled="!currentQuestion.trim() && chatAttachments.length===0" class="bg-primary text-on-primary p-2.5 rounded-xl shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 transition-all flex items-center justify-center disabled:opacity-40 disabled:hover:scale-100">
+                    <span class="material-symbols-outlined">send</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <!-- Chat Right Panel: Toolbox -->
+            <aside class="w-inspector_width h-full bg-surface-container-low border-l border-outline-variant p-gutter overflow-y-auto scrollbar-thin shrink-0">
+              <h3 class="font-headline-md text-on-surface text-lg font-semibold mb-6 flex items-center gap-2">
+                <span class="material-symbols-outlined text-primary">grid_view</span> 工具箱
+              </h3>
+              <!-- GPA Mini Calculator -->
+              <div class="glass-panel p-5 rounded-2xl border-primary/20 bg-primary/5 mb-6">
+                <div class="flex items-center justify-between mb-4">
+                  <span class="font-label-md text-primary font-semibold text-sm">GPA 快速查看</span>
+                  <span class="material-symbols-outlined text-primary">calculate</span>
+                </div>
+                <div class="text-center mb-4">
+                  <span class="text-3xl font-bold text-on-surface block">{{gpaResult.gpa || '—'}}</span>
+                  <span class="text-[10px] text-on-surface-variant">当前 GPA · {{gpaResult.totalCredits||0}} 学分</span>
+                </div>
+                <button @click="switchView('gpa')" class="w-full py-2.5 bg-primary-container/20 text-primary rounded-xl font-label-md text-sm hover:bg-primary/10 transition-colors">查看详情 →</button>
+              </div>
+              <!-- Quick Actions -->
+              <div class="space-y-3 mb-6">
+                <p class="text-[10px] uppercase tracking-wider font-bold text-on-surface-variant px-1">快速操作</p>
+                <button @click="showAddDdl=true" class="w-full flex items-center justify-between p-4 bg-white border border-outline-variant rounded-2xl hover:bg-surface-container-high transition-colors group">
+                  <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-full bg-error/5 text-error flex items-center justify-center">
+                      <span class="material-symbols-outlined">add_alert</span>
+                    </div>
+                    <div class="text-left">
+                      <p class="font-label-md text-sm font-semibold">添加 DDL</p>
+                      <p class="text-[10px] text-on-surface-variant">手动录入截止日期</p>
+                    </div>
+                  </div>
+                  <span class="material-symbols-outlined text-on-surface-variant opacity-0 group-hover:opacity-100 transition-opacity">chevron_right</span>
+                </button>
+                <button @click="showAddGrade=true" class="w-full flex items-center justify-between p-4 bg-white border border-outline-variant rounded-2xl hover:bg-surface-container-high transition-colors group">
+                  <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-full bg-primary/5 text-primary flex items-center justify-center">
+                      <span class="material-symbols-outlined">school</span>
+                    </div>
+                    <div class="text-left">
+                      <p class="font-label-md text-sm font-semibold">录入成绩</p>
+                      <p class="text-[10px] text-on-surface-variant">更新 GPA 数据</p>
+                    </div>
+                  </div>
+                  <span class="material-symbols-outlined text-on-surface-variant opacity-0 group-hover:opacity-100 transition-opacity">chevron_right</span>
+                </button>
+                <button @click="switchView('platforms')" class="w-full flex items-center justify-between p-4 bg-white border border-outline-variant rounded-2xl hover:bg-surface-container-high transition-colors group">
+                  <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-full bg-secondary-container/30 text-secondary flex items-center justify-center">
+                      <span class="material-symbols-outlined">link</span>
+                    </div>
+                    <div class="text-left">
+                      <p class="font-label-md text-sm font-semibold">平台管理</p>
+                      <p class="text-[10px] text-on-surface-variant">管理作业提交平台</p>
+                    </div>
+                  </div>
+                  <span class="material-symbols-outlined text-on-surface-variant opacity-0 group-hover:opacity-100 transition-opacity">chevron_right</span>
+                </button>
+              </div>
+              <!-- DDL Mini Preview -->
+              <div class="glass-panel p-5 rounded-2xl">
+                <h4 class="font-label-md text-on-surface text-sm font-semibold mb-4 flex items-center gap-2">
+                  <span class="material-symbols-outlined text-error text-lg">timer</span> 临近 DDL
+                </h4>
+                <div class="space-y-3">
+                  <div v-for="ddl in topDdls.slice(0,3)" :key="ddl.id" class="flex items-center justify-between p-2 rounded-xl bg-surface-container-lowest">
+                    <div class="flex items-center gap-2">
+                      <div class="w-2 h-2 rounded-full" :class="ddl.urgencyLevel==='urgent'?'bg-error':ddl.urgencyLevel==='warn'?'bg-orange-500':'bg-primary'"></div>
+                      <span class="font-body-sm text-on-surface-variant truncate w-28 text-xs">{{ddl.title}}</span>
+                    </div>
+                    <span class="font-label-sm text-xs font-bold" :class="{'text-error animate-pulse-text': ddl.urgencyLevel==='urgent', 'text-orange-500': ddl.urgencyLevel==='warn', 'text-on-surface-variant': ddl.urgencyLevel!=='urgent'&&ddl.urgencyLevel!=='warn'}">{{ddl.displayText}}</span>
+                  </div>
+                  <div v-if="topDdls.length===0" class="text-center text-on-surface-variant/40 text-xs py-4">👍 暂无临近 DDL</div>
+                </div>
+              </div>
+            </aside>
+          </div>
+
+          <!-- ═══════ SCHEDULE: 课程表 ═══════ -->
+          <div v-if="activeView==='schedule'" class="max-w-4xl">
+            <div class="flex justify-between items-end mb-6">
+              <div>
+                <h2 class="font-display-lg text-on-surface text-4xl font-bold tracking-tight">课程表</h2>
+                <p class="font-body-md text-on-surface-variant mt-1">上传 Sections 截图 · AI 识别 · 自动导入 + 上课提醒</p>
+              </div>
+              <button @click="openScheduleUpload" class="px-5 py-2.5 bg-primary text-white rounded-xl font-label-md shadow-md shadow-primary/20 hover:brightness-110 transition-all flex items-center gap-2">
+                <span class="material-symbols-outlined">edit_note</span> 录入课表
+              </button>
+            </div>
+
+            <!-- OCR Info Box -->
+            <div class="glass-panel rounded-2xl p-4 mb-6 border border-primary/10 bg-primary/[0.02]">
+              <div class="flex items-start gap-3">
+                <span class="material-symbols-outlined text-primary mt-0.5">info</span>
+                <div>
+                  <p class="text-sm font-semibold text-on-surface mb-1">如何使用 AI 识别课程</p>
+                  <ol class="text-xs text-on-surface-variant leading-relaxed space-y-0.5">
+                    <li>1. 确保 <b class="text-primary">OCR 服务已启动</b>（双击 start.bat 自动启动，或手动 <code class="bg-surface-container px-1 rounded">python ocr_server.py</code>）</li>
+                    <li>2. 在 UIC 网页上找到课程表的 <b class="text-primary">Sections 部分</b>（包含课程名、时间、教室的表格）</li>
+                    <li>3. 截取 Sections 表格截图（<b>PNG/JPG</b>，确保包含完整表头和数据行）</li>
+                    <li>4. 拖入下方区域，点击「<b>AI 识别课表</b>」→ 核对结果 → 点击「全部导入」</li>
+                  </ol>
+                </div>
+              </div>
+            </div>
+
+            <!-- Image Upload Zone -->
+            <div 
+              class="glass-panel rounded-3xl p-10 mb-6 text-center border-2 border-dashed transition-all cursor-pointer relative overflow-hidden"
+              :class="scheduleDragOver ? 'border-primary bg-primary/[0.03] scale-[1.01]' : 'border-outline-variant/40 hover:border-primary/40'"
+              @click="triggerScheduleFileInput"
+              @dragover.prevent="scheduleDragOver=true"
+              @dragleave.prevent="scheduleDragOver=false"
+              @drop.prevent="handleScheduleDrop"
+            >
+              <div v-if="!scheduleImageData" class="relative z-10">
+                <span class="material-symbols-outlined text-5xl mb-4 block" :class="scheduleDragOver ? 'text-primary' : 'text-on-surface-variant/30'">cloud_upload</span>
+                <p class="text-on-surface-variant font-medium mb-1">拖拽 Sections 课程表截图到此处</p>
+                <p class="text-xs text-on-surface-variant/40">请上传 UIC 课程表的 <b>Sections 部分</b>截图（含课程名、时间、教室的表格）</p>
+              </div>
+              <div v-else class="relative z-10">
+                <img :src="scheduleImageData" alt="课表截图" class="max-h-80 mx-auto rounded-xl shadow-md border border-outline-variant/20 object-contain">
+                <p class="text-xs text-on-surface-variant/50 mt-3">✅ 图片已加载 · {{scheduleImageName}}</p>
+                <div class="flex gap-3 justify-center mt-3">
+                  <button @click.stop="recognizeSchedule" class="text-sm px-5 py-2.5 bg-primary text-white rounded-xl font-semibold hover:brightness-110 transition-all shadow-md shadow-primary/20 flex items-center gap-2" :disabled="scheduleOcrRunning">
+                    <span class="material-symbols-outlined text-lg" :class="scheduleOcrRunning?'animate-spin':''">{{scheduleOcrRunning ? 'hourglass_top' : 'auto_awesome'}}</span>
+                    {{scheduleOcrRunning ? '识别中...' : '🤖 AI 识别课表'}}
+                  </button>
+                  <button @click.stop="triggerScheduleFileInput" class="text-[11px] px-3 py-1.5 bg-primary/5 text-primary rounded-full hover:bg-primary/10 transition-colors">更换图片</button>
+                  <button @click.stop="clearScheduleImage" class="text-[11px] px-3 py-1.5 bg-surface-container rounded-full hover:bg-error/5 hover:text-error transition-colors">清除</button>
+                </div>
+              </div>
+            </div>
+            <input type="file" id="scheduleFileInput" style="display:none" accept="image/*" @change="handleScheduleFileSelect">
+
+            <!-- OCR Progress -->
+            <div v-if="scheduleOcrRunning" class="glass-panel rounded-2xl p-6 mb-6 border border-primary/20 text-center">
+              <div class="flex items-center justify-center gap-3 mb-2">
+                <span class="material-symbols-outlined text-primary animate-spin text-2xl">progress_activity</span>
+                <span class="text-sm text-on-surface-variant">{{scheduleOcrStatus}}</span>
+              </div>
+              <div class="w-full bg-surface-container rounded-full h-2 overflow-hidden">
+                <div class="h-full bg-primary rounded-full transition-all duration-300" :style="{width: scheduleOcrProgress+'%'}"></div>
+              </div>
+              <p class="text-[10px] text-on-surface-variant/40 mt-2">{{scheduleOcrProgress}}%</p>
+            </div>
+
+            <!-- OCR Results Preview -->
+            <div v-if="scheduleOcrResults.length > 0 && !scheduleOcrRunning" class="mb-6">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="font-headline-md text-on-surface flex items-center gap-2">
+                  <span class="material-symbols-outlined text-primary">checklist</span>
+                  AI 识别结果 ({{scheduleOcrResults.length}} 门课程)
+                </h3>
+                <div class="flex gap-2">
+                  <button @click="confirmScheduleOcr" class="px-4 py-2 bg-primary text-white rounded-xl text-sm font-semibold hover:brightness-110 transition-all shadow-sm shadow-primary/20 flex items-center gap-1.5">
+                    <span class="material-symbols-outlined text-base">done_all</span> 全部导入
+                  </button>
+                  <button @click="scheduleOcrResults=[]" class="px-4 py-2 bg-surface-container rounded-xl text-sm text-on-surface-variant hover:bg-error/5 hover:text-error transition-colors">丢弃</button>
+                </div>
+              </div>
+              <div class="bg-white rounded-2xl border border-outline-variant/30 overflow-hidden shadow-sm">
+                <table class="w-full border-collapse text-sm">
+                  <thead>
+                    <tr class="bg-surface-container">
+                      <th class="py-2.5 px-4 text-left text-xs text-on-surface-variant">课程名称</th>
+                      <th class="py-2.5 px-4 text-center text-xs text-on-surface-variant">星期</th>
+                      <th class="py-2.5 px-4 text-center text-xs text-on-surface-variant">时间</th>
+                      <th class="py-2.5 px-4 text-center text-xs text-on-surface-variant">教室</th>
+                      <th class="py-2.5 px-4 text-center text-xs text-on-surface-variant">状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(course, idx) in scheduleOcrResults" :key="idx" class="border-t border-outline-variant/20" :class="course.confirmed ? '' : 'bg-orange-50/30'">
+                      <td class="py-2.5 px-4">
+                        <input v-if="!course.confirmed" v-model="course.name" class="w-full text-sm border border-outline-variant rounded-lg px-2 py-1 outline-none focus:border-primary transition-colors">
+                        <span v-else class="font-medium text-on-surface">{{course.name}}</span>
+                      </td>
+                      <td class="py-2.5 px-4 text-center">
+                        <select v-if="!course.confirmed" v-model="course.day" class="text-xs border border-outline-variant rounded-lg px-2 py-1 outline-none focus:border-primary transition-colors">
+                          <option value="mon">周一</option><option value="tue">周二</option><option value="wed">周三</option><option value="thu">周四</option><option value="fri">周五</option>
+                        </select>
+                        <span v-else class="text-xs">{{dayLabel(course.day)}}</span>
+                      </td>
+                      <td class="py-2.5 px-4 text-center">
+                        <template v-if="course.start_time">
+                          <span v-if="!course.confirmed" class="text-xs text-on-surface-variant">{{course.start_time}}-{{course.end_time}}</span>
+                          <span v-else class="text-xs font-medium text-primary">{{course.start_time}}-{{course.end_time}}</span>
+                        </template>
+                        <select v-else-if="!course.confirmed" v-model="course.period" class="text-xs border border-outline-variant rounded-lg px-2 py-1 outline-none focus:border-primary transition-colors">
+                          <option v-for="p in 5" :key="p" :value="p">时段{{p}}</option>
+                        </select>
+                        <span v-else class="text-xs text-on-surface-variant">{{periodLabel(course.period)}}</span>
+                      </td>
+                      <td class="py-2.5 px-4 text-center">
+                        <input v-if="!course.confirmed" v-model="course.location" class="w-20 text-xs text-center border border-outline-variant rounded-lg px-2 py-1 outline-none focus:border-primary transition-colors">
+                        <span v-else class="text-xs text-on-surface-variant">{{course.location}}</span>
+                      </td>
+                      <td class="py-2.5 px-4 text-center">
+                        <button v-if="!course.confirmed" @click="course.confirmed=true" class="text-[11px] px-2 py-1 bg-green-50 text-green-600 rounded-full hover:bg-green-100 transition-colors">确认</button>
+                        <span v-else class="material-symbols-outlined text-green-500 text-lg">check_circle</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="text-[10px] text-on-surface-variant/40 mt-2">⚠️ 橙色行需手动确认，可编辑课程名、星期、时段和教室</p>
+            </div>
+
+            <!-- OCR Error -->
+            <div v-if="scheduleOcrError" class="glass-panel rounded-2xl p-6 mb-6 border border-error/20 bg-error/5">
+              <div class="flex items-center gap-2 text-error mb-2">
+                <span class="material-symbols-outlined">error</span>
+                <span class="font-semibold text-sm">识别失败</span>
+              </div>
+              <p class="text-sm text-on-surface-variant mb-3 whitespace-pre-line leading-relaxed">{{scheduleOcrError}}</p>
+              <button @click="scheduleOcrError=''" class="text-xs px-4 py-1.5 bg-primary text-white rounded-full hover:brightness-110 transition-colors">重试</button>
+            </div>
+
+            <!-- Empty Schedule State -->
+            <div v-if="scheduleCourses.length === 0 && !scheduleImageData" class="text-center text-on-surface-variant/40 py-20">
+              <span class="material-symbols-outlined text-6xl mb-5 block">calendar_month</span>
+              <p class="text-xl font-semibold mb-2">暂无课程</p>
+              <p class="text-sm mb-1">请上传 UIC 课程表 <b>Sections 部分</b>的截图</p>
+              <p class="text-xs">支持拖拽或点击上方区域上传（含课程名、时间、教室的表格）</p>
+            </div>
+
+            <!-- Schedule Table -->
+            <div v-if="scheduleCourses.length > 0" class="bg-white rounded-2xl border border-outline-variant/30 overflow-hidden shadow-sm">
+              <table class="w-full border-collapse">
+                <thead>
+                  <tr>
+                    <th class="py-3 px-4 bg-surface-container text-left font-label-sm text-on-surface-variant text-xs w-[110px]">时间</th>
+                    <th class="py-3 px-4 bg-surface-container text-center font-label-sm text-on-surface-variant text-xs">周一</th>
+                    <th class="py-3 px-4 bg-surface-container text-center font-label-sm text-on-surface-variant text-xs">周二</th>
+                    <th class="py-3 px-4 bg-surface-container text-center font-label-sm text-on-surface-variant text-xs">周三</th>
+                    <th class="py-3 px-4 bg-surface-container text-center font-label-sm text-on-surface-variant text-xs">周四</th>
+                    <th class="py-3 px-4 bg-surface-container text-center font-label-sm text-on-surface-variant text-xs">周五</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="slot in timeSlots" :key="slot.time" class="border-t border-outline-variant/20">
+                    <td class="py-3 px-4 text-xs font-medium text-on-surface-variant bg-surface-container-low/30">{{slot.time}}</td>
+                    <td v-for="day in ['mon','tue','wed','thu','fri']" :key="day" class="py-2 px-3 border-l border-outline-variant/20">
+                      <div v-for="c in getCoursesAt(day, slot.period)" :key="c.name" class="bg-primary/5 rounded-lg px-2 py-1.5 mb-1 border border-primary/10">
+                        <div class="text-xs font-semibold text-primary">{{c.name}}</div>
+                        <div class="text-[10px] text-on-surface-variant/50">{{c.location}}</div>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- ═══════ DDL ═══════ -->
+          <div v-if="activeView==='ddl'" class="max-w-4xl">
+            <div class="flex justify-between items-end mb-6">
+              <div>
+                <h2 class="font-display-lg text-on-surface text-4xl font-bold tracking-tight">DDL 提醒</h2>
+                <p class="font-body-md text-on-surface-variant mt-1">精确到分钟 · 手动录入</p>
+              </div>
+              <button @click="showAddDdl=true" class="px-5 py-2.5 bg-primary text-white rounded-xl font-label-md shadow-md shadow-primary/20 hover:brightness-110 transition-all flex items-center gap-2">
+                <span class="material-symbols-outlined">add</span> 添加 DDL
+              </button>
+            </div>
+            <div v-if="ddlList.length===0" class="text-center text-on-surface-variant/40 py-16">
+              <span class="material-symbols-outlined text-5xl mb-4 block">check_circle</span>
+              <p class="text-lg">暂无 DDL，继续保持！</p>
+            </div>
+            <div class="space-y-3">
+              <div v-for="ddl in ddlList" :key="ddl.id" class="glass-panel p-4 rounded-2xl flex items-center gap-4 transition-all hover:shadow-md" :class="ddl.done===1 ? 'opacity-40' : ''">
+                <div class="text-2xl">
+                  <span v-if="ddl.urgencyLevel==='urgent'" class="material-symbols-outlined text-error" style="font-variation-settings:'FILL'1;">local_fire_department</span>
+                  <span v-else-if="ddl.urgencyLevel==='warn'" class="material-symbols-outlined text-orange-500">error</span>
+                  <span v-else-if="ddl.urgencyLevel==='expired'" class="material-symbols-outlined text-on-surface-variant/40">cancel</span>
+                  <span v-else class="material-symbols-outlined text-on-surface-variant/40">schedule</span>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="font-label-md text-on-surface font-semibold truncate text-sm">{{ddl.title}}</span>
+                    <span v-if="ddl.platformName" class="text-[10px] bg-primary/5 text-primary px-2 py-0.5 rounded-full font-medium">{{ddl.platformName}}</span>
+                    <span class="text-[10px] bg-surface-container px-2 py-0.5 rounded-full text-on-surface-variant font-medium">{{sourceLabel(ddl.source)}}</span>
+                    <span v-if="ddl.courseName" class="text-[10px] bg-primary/5 text-primary px-2 py-0.5 rounded-full font-medium">{{ddl.courseName}}</span>
+                  </div>
+                  <p class="text-xs text-on-surface-variant mt-1.5">{{ddl.dueDate}}</p>
+                </div>
+                <div class="flex items-center gap-2 flex-shrink-0">
+                  <span v-if="ddl.done===1" class="text-[11px] font-semibold text-green-600 bg-green-50 px-3 py-1 rounded-full">✓ 已完成</span>
+                  <span v-else class="text-sm font-bold tabular-nums" :class="{'text-error animate-pulse-text': ddl.urgencyLevel==='urgent', 'text-orange-500': ddl.urgencyLevel==='warn', 'text-on-surface-variant': ddl.urgencyLevel!=='urgent'&&ddl.urgencyLevel!=='warn'}">{{ddl.displayText}}</span>
+                  <button v-if="ddl.done===0" @click="markDone(ddl.id)" class="w-8 h-8 rounded-full hover:bg-green-50 text-on-surface-variant hover:text-green-600 transition-colors flex items-center justify-center" title="标记完成">
+                    <span class="material-symbols-outlined text-lg">check</span>
+                  </button>
+                  <button @click="deleteDdl(ddl.id)" class="w-8 h-8 rounded-full hover:bg-error/5 text-on-surface-variant/30 hover:text-error transition-colors flex items-center justify-center" title="删除">
+                    <span class="material-symbols-outlined text-lg">delete</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ═══════ GPA ═══════ -->
+          <div v-if="activeView==='gpa'" class="max-w-4xl">
+            <div class="flex justify-between items-end mb-6">
+              <div>
+                <h2 class="font-display-lg text-on-surface text-4xl font-bold tracking-tight">GPA 计算器</h2>
+                <p class="font-body-md text-on-surface-variant mt-1">目标管理 · 学期/累计GPA · 智能建议</p>
+              </div>
+              <div class="flex gap-3">
+                <button @click="showAddGrade=true" class="px-5 py-2.5 bg-primary text-white rounded-xl font-label-md shadow-md shadow-primary/20 hover:brightness-110 transition-all flex items-center gap-2">
+                  <span class="material-symbols-outlined">add</span> 录入成绩
+                </button>
+                <button @click="calcGpa" class="px-5 py-2.5 glass-panel rounded-xl font-label-md text-primary hover:bg-primary/5 transition-all flex items-center gap-2">
+                  <span class="material-symbols-outlined">calculate</span> 重新计算
+                </button>
+              </div>
+            </div>
+
+            <!-- Three GPA Cards: Target / sGPA / cGPA -->
+            <div class="grid grid-cols-3 gap-6 mb-8">
+              <!-- Target GPA Setter -->
+              <div class="glass-panel rounded-3xl p-6 text-center relative overflow-hidden border-2 border-primary/15 bg-primary/[0.02]">
+                <div class="absolute -right-3 -top-3 w-14 h-14 bg-primary/10 rounded-full"></div>
+                <div class="relative z-10">
+                  <span class="text-[10px] uppercase tracking-widest text-primary font-bold block mb-2">目标 GPA</span>
+                  <div v-if="!editingTarget" class="group cursor-pointer py-2" @click="editingTarget=true; targetGpaInput=targetGpa">
+                    <span class="text-4xl font-extrabold text-on-surface block" :class="targetGpa ? 'text-primary' : 'text-on-surface-variant/25'">{{targetGpa ? targetGpa.toFixed(2) : '—'}}</span>
+                    <span class="text-[10px] text-on-surface-variant/30 opacity-0 group-hover:opacity-100 transition-opacity inline-block mt-1">点击设定目标</span>
+                  </div>
+                  <div v-else class="py-2 flex flex-col items-center gap-2.5">
+                    <input v-model.number="targetGpaInput" type="number" min="0" max="4" step="0.01" class="w-24 text-center text-3xl font-bold border-b-2 border-primary bg-transparent outline-none text-primary" @keyup.enter="confirmTargetGpa">
+                    <div class="flex gap-2">
+                      <button @click="confirmTargetGpa" class="text-[11px] px-3 py-1.5 bg-primary text-white rounded-full font-medium">确定</button>
+                      <button @click="editingTarget=false" class="text-[11px] px-3 py-1.5 bg-surface-container rounded-full">取消</button>
+                    </div>
+                  </div>
+                  <p class="text-xs text-on-surface-variant mt-2">4.0 制 · UIC</p>
+                </div>
+              </div>
+
+              <!-- sGPA Card -->
+              <div class="glass-panel rounded-3xl p-6 text-center relative overflow-hidden">
+                <div class="absolute -right-3 -top-3 w-14 h-14 bg-primary/5 rounded-full"></div>
+                <div class="relative z-10">
+                  <span class="text-[10px] uppercase tracking-widest text-on-surface-variant/60 font-bold block mb-2">本学期 sGPA</span>
+                  <span class="text-4xl font-extrabold text-on-surface block py-2" :class="{'text-primary': sGPA > 0}">{{sGPA > 0 ? sGPA.toFixed(2) : '—'}}</span>
+                  <p class="text-xs text-on-surface-variant mt-2">{{currentSemesterCredits}} 学分 · {{currentSemester||'—'}}</p>
+                  <div v-if="sGPA > 0 && targetGpa > 0" class="mt-2 text-[11px] font-semibold inline-flex items-center gap-1 px-2 py-0.5 rounded-full" :class="sGPA >= targetGpa ? 'bg-green-50 text-green-600' : 'bg-orange-50 text-orange-500'">
+                    <span class="material-symbols-outlined text-sm">{{sGPA >= targetGpa ? 'check_circle' : 'trending_down'}}</span>
+                    {{sGPA >= targetGpa ? '达到目标' : '低于目标 '+(targetGpa - sGPA).toFixed(2)}}
+                  </div>
+                </div>
+              </div>
+
+              <!-- cGPA Card -->
+              <div class="glass-panel rounded-3xl p-6 text-center relative overflow-hidden">
+                <div class="absolute -right-3 -top-3 w-14 h-14 bg-primary/5 rounded-full"></div>
+                <div class="relative z-10">
+                  <span class="text-[10px] uppercase tracking-widest text-on-surface-variant/60 font-bold block mb-2">累计 cGPA</span>
+                  <span class="text-4xl font-extrabold text-on-surface block py-2" :class="{'text-primary': cGPA > 0}">{{cGPA > 0 ? cGPA.toFixed(2) : '—'}}</span>
+                  <p class="text-xs text-on-surface-variant mt-2">{{gpaResult.totalCredits||0}} 总学分</p>
+                  <div v-if="cGPA > 0 && targetGpa > 0" class="mt-2 text-[11px] font-semibold inline-flex items-center gap-1 px-2 py-0.5 rounded-full" :class="cGPA >= targetGpa ? 'bg-green-50 text-green-600' : 'bg-orange-50 text-orange-500'">
+                    <span class="material-symbols-outlined text-sm">{{cGPA >= targetGpa ? 'check_circle' : 'trending_down'}}</span>
+                    {{cGPA >= targetGpa ? '达到目标' : '低于目标 '+(targetGpa - cGPA).toFixed(2)}}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Gap Analysis & Advice -->
+            <div v-if="targetGpa > 0 && cGPA > 0" class="glass-panel rounded-3xl p-8 mb-8 border-primary/10">
+              <h3 class="font-headline-md text-on-surface text-lg font-semibold mb-6 flex items-center gap-2">
+                <span class="material-symbols-outlined text-primary">insights</span> GPA 差距分析与选课建议
+              </h3>
+              <div class="grid grid-cols-2 gap-8">
+                <!-- Left: Gap Analysis -->
+                <div>
+                  <div class="flex items-center gap-3 mb-4">
+                    <div class="w-12 h-12 rounded-full bg-primary/5 flex items-center justify-center">
+                      <span class="material-symbols-outlined text-primary">target</span>
+                    </div>
+                    <div>
+                      <p class="text-sm font-semibold text-on-surface">目标差距</p>
+                      <p class="text-lg font-extrabold" :class="gapToTarget > 0 ? 'text-error' : 'text-green-600'">
+                        {{gapToTarget > 0 ? '差 ' + gapToTarget.toFixed(2) : '已达成 ✓'}}
+                      </p>
+                    </div>
+                  </div>
+                  <div class="bg-surface-container/50 rounded-xl p-4 text-sm text-on-surface-variant mb-3 space-y-2">
+                    <p><span class="font-semibold text-on-surface">累计已修：</span>{{gpaResult.totalCredits||0}} 学分 · cGPA {{cGPA.toFixed(2)}}</p>
+                    <div v-if="gapToTarget > 0">
+                      <p>
+                        <span class="font-semibold text-on-surface">剩余学分需达到：</span>
+                        <span class="font-bold text-primary">{{requiredRemainingGpa}} GPA</span>
+                      </p>
+                      <p class="text-xs text-on-surface-variant/60">* 按预计总学分 {{totalExpectedCredits}} 计算</p>
+                    </div>
+                  </div>
+                  <div class="bg-surface-container/50 rounded-xl p-4">
+                    <p class="text-xs text-on-surface-variant mb-2 font-semibold">预计毕业总学分</p>
+                    <div class="flex items-center gap-3">
+                      <input v-model.number="totalExpectedCredits" type="range" min="60" max="200" step="1" class="flex-1 accent-primary">
+                      <span class="text-sm font-bold text-primary tabular-nums min-w-[40px] text-right">{{totalExpectedCredits}}</span>
+                    </div>
+                    <p class="text-[10px] text-on-surface-variant/40 mt-1">拖动滑动条调整</p>
+                  </div>
+                </div>
+                <!-- Right: Advice -->
+                <div>
+                  <h4 class="text-sm font-semibold text-on-surface mb-4">🎯 选课策略 & 等级建议</h4>
+                  <div v-if="gapToTarget > 0">
+                    <div class="bg-primary/5 rounded-xl p-4 border border-primary/10 mb-4">
+                      <p class="text-sm text-on-surface-variant leading-relaxed" v-html="gradeAdviceHtml"></p>
+                    </div>
+                    <p class="text-[10px] uppercase tracking-wider font-bold text-on-surface-variant/50 mb-2 px-1">等级方案评估</p>
+                    <div class="space-y-1.5">
+                      <div v-for="plan in gradeScenarios" :key="plan.label" class="flex items-center justify-between text-xs px-3 py-2 rounded-lg transition-all" :class="plan.recommended ? 'bg-primary/5 border border-primary/20 font-semibold' : 'bg-surface-container/50 opacity-50'">
+                        <span>{{plan.label}}</span>
+                        <span class="text-on-surface-variant/60">{{plan.desc}}</span>
+                        <span :class="plan.recommended ? 'text-primary font-bold' : 'text-on-surface-variant/40'" class="tabular-nums">{{plan.resultGpa}}</span>
+                      </div>
+                    </div>
+                    <p class="text-[10px] text-on-surface-variant/40 mt-2 px-1">* 绿色高亮为可达成目标的方案</p>
+                  </div>
+                  <div v-else class="bg-green-50 rounded-xl p-5 border border-green-100 text-center">
+                    <span class="material-symbols-outlined text-green-500 text-3xl mb-2 block">celebration</span>
+                    <p class="text-sm text-green-700 font-medium">你当前的 cGPA 已达到目标！</p>
+                    <p class="text-xs text-green-600/70 mt-1">保持现有水平即可。</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Empty state when no target set -->
+            <div v-if="!targetGpa && cGPA > 0" class="glass-panel rounded-3xl p-8 mb-8 border-dashed border-2 border-primary/15 text-center">
+              <span class="material-symbols-outlined text-primary/30 text-5xl mb-3 block">flag</span>
+              <p class="text-on-surface-variant mb-1">设定目标 GPA 以获取个性化选课建议</p>
+              <p class="text-xs text-on-surface-variant/40 mb-4">点击上方「目标 GPA」卡片即可设置</p>
+            </div>
+
+            <!-- Grade Table -->
+            <div v-if="gpaResult.courses && gpaResult.courses.length>0" class="bg-white rounded-2xl border border-outline-variant/30 overflow-hidden shadow-sm">
+              <div class="flex items-center justify-between p-4 bg-surface-container">
+                <h4 class="font-label-md text-on-surface text-sm font-semibold">成绩记录</h4>
+                <select v-model="gpaSemesterFilter" class="text-xs px-3 py-1.5 bg-white rounded-lg border border-outline-variant outline-none focus:border-primary transition-colors">
+                  <option value="">全部学期</option>
+                  <option v-for="sem in uniqueSemesters" :key="sem" :value="sem">{{sem}}</option>
+                </select>
+              </div>
+              <table class="w-full border-collapse">
+                <thead>
+                  <tr class="bg-surface-container">
+                    <th class="py-3 px-4 text-left font-label-sm text-on-surface-variant text-xs">课程</th>
+                    <th class="py-3 px-4 text-center font-label-sm text-on-surface-variant text-xs">学分</th>
+                    <th class="py-3 px-4 text-center font-label-sm text-on-surface-variant text-xs">等级</th>
+                    <th class="py-3 px-4 text-center font-label-sm text-on-surface-variant text-xs">绩点</th>
+                    <th class="py-3 px-4 text-center font-label-sm text-on-surface-variant text-xs">学期</th>
+                    <th class="py-3 px-4 text-center font-label-sm text-on-surface-variant text-xs">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="g in filteredGrades" :key="g.id" class="border-t border-outline-variant/20 hover:bg-surface-container-low/30">
+                    <td class="py-3 px-4 text-sm font-medium">{{g.courseName}}</td>
+                    <td class="py-3 px-4 text-center text-sm">{{g.credits}}</td>
+                    <td class="py-3 px-4 text-center text-sm font-bold" :class="g.gradePoint >= 3.7 ? 'text-primary' : g.gradePoint >= 3.0 ? 'text-on-surface' : g.gradePoint >= 2.0 ? 'text-on-surface-variant' : 'text-error'">{{g.score}}</td>
+                    <td class="py-3 px-4 text-center text-sm font-bold text-primary tabular-nums">{{g.gradePoint}}</td>
+                    <td class="py-3 px-4 text-center text-xs text-on-surface-variant">{{g.semester||'—'}}</td>
+                    <td class="py-3 px-4 text-center"><button @click="deleteGrade(g.id)" class="text-on-surface-variant/30 hover:text-error transition-colors"><span class="material-symbols-outlined text-lg">delete</span></button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-else class="text-center text-on-surface-variant/40 py-16">
+              <span class="material-symbols-outlined text-5xl mb-4 block">calculate</span>
+              <p class="text-lg">暂无成绩记录，点击「录入成绩」开始</p>
+            </div>
+
+            <!-- GPA Scale Reference -->
+            <div class="mt-6 bg-surface-container rounded-xl p-4">
+              <p class="text-xs text-on-surface-variant/70 font-semibold mb-2">UIC 绩点换算表（4.0 制）</p>
+              <div class="grid grid-cols-5 gap-x-3 gap-y-2 text-[11px]">
+                <div class="text-center"><span class="font-bold text-primary">A</span><br><span class="text-on-surface-variant">4.0</span><br><span class="text-on-surface-variant/40">≥90</span></div>
+                <div class="text-center"><span class="font-bold text-primary/80">A-</span><br><span class="text-on-surface-variant">3.7</span><br><span class="text-on-surface-variant/40">85-89</span></div>
+                <div class="text-center"><span class="font-bold">B+</span><br><span class="text-on-surface-variant">3.3</span><br><span class="text-on-surface-variant/40">80-84</span></div>
+                <div class="text-center"><span class="font-bold">B</span><br><span class="text-on-surface-variant">3.0</span><br><span class="text-on-surface-variant/40">75-79</span></div>
+                <div class="text-center"><span class="font-bold">B-</span><br><span class="text-on-surface-variant">2.7</span><br><span class="text-on-surface-variant/40">70-74</span></div>
+                <div class="text-center"><span class="font-bold">C+</span><br><span class="text-on-surface-variant">2.3</span><br><span class="text-on-surface-variant/40">65-69</span></div>
+                <div class="text-center"><span class="font-bold">C</span><br><span class="text-on-surface-variant">2.0</span><br><span class="text-on-surface-variant/40">60-64</span></div>
+                <div class="text-center"><span class="font-bold">C-</span><br><span class="text-on-surface-variant">1.7</span><br><span class="text-on-surface-variant/40">55-59</span></div>
+                <div class="text-center"><span class="font-bold">D</span><br><span class="text-on-surface-variant">1.0</span><br><span class="text-on-surface-variant/40">50-54</span></div>
+                <div class="text-center"><span class="font-bold text-error">F</span><br><span class="text-on-surface-variant">0.0</span><br><span class="text-on-surface-variant/40">&lt;50</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ═══════ REVIEWS: 课程评价 ═══════ -->
+          <div v-if="activeView==='reviews'" class="max-w-4xl">
+            <div class="flex justify-between items-end mb-6">
+              <div>
+                <h2 class="font-display-lg text-on-surface text-4xl font-bold tracking-tight">课程评价</h2>
+                <p class="font-body-md text-on-surface-variant mt-1">分享你的选课体验</p>
+              </div>
+              <button @click="showAddReview=true" class="px-5 py-2.5 bg-primary text-white rounded-xl font-label-md shadow-md shadow-primary/20 hover:brightness-110 transition-all flex items-center gap-2">
+                <span class="material-symbols-outlined">add</span> 添加评价
+              </button>
+            </div>
+            <div v-if="reviews.length===0" class="text-center text-on-surface-variant/40 py-16">
+              <span class="material-symbols-outlined text-5xl mb-4 block">rate_review</span>
+              <p class="text-lg">暂无评价</p>
+            </div>
+            <div class="space-y-3">
+              <div v-for="rev in reviews" :key="rev.id" class="glass-panel p-5 rounded-2xl">
+                <div class="flex justify-between items-start">
+                  <div class="flex-1">
+                    <div class="flex items-center gap-3 mb-2">
+                      <h4 class="font-label-md text-on-surface font-semibold text-sm">{{rev.courseName}}</h4>
+                      <div class="flex text-amber-500">
+                        <span v-for="s in 5" :key="s" class="material-symbols-outlined text-base" :style="{'font-variation-settings': s <= rev.rating ? '\'FILL\' 1' : '\'FILL\' 0'}">star</span>
+                      </div>
+                    </div>
+                    <p class="text-sm text-on-surface-variant leading-relaxed">{{rev.comment}}</p>
+                    <p class="text-xs text-on-surface-variant/50 mt-3">{{rev.reviewDate}}</p>
+                  </div>
+                  <button @click="deleteReview(rev.id)" class="text-on-surface-variant/30 hover:text-error transition-colors flex-shrink-0"><span class="material-symbols-outlined">delete</span></button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ═══════ EMAIL: 邮件摘要 ═══════ -->
+          <div v-if="activeView==='email'" class="max-w-4xl">
+            <div class="flex justify-between items-end mb-6">
+              <div>
+                <h2 class="font-display-lg text-on-surface text-4xl font-bold tracking-tight">邮件摘要</h2>
+                <p class="font-body-md text-on-surface-variant mt-1">AI 自动分类 & 智能摘要</p>
+              </div>
+              <button @click="showAddEmail=true" class="px-5 py-2.5 bg-primary text-white rounded-xl font-label-md shadow-md shadow-primary/20 hover:brightness-110 transition-all flex items-center gap-2">
+                <span class="material-symbols-outlined">add</span> 粘贴邮件
+              </button>
+            </div>
+            <div class="flex gap-2 mb-6 flex-wrap">
+              <button v-for="cat in emailCategories" :key="cat.value" @click="emailFilter=cat.value; loadEmails()" class="px-4 py-1.5 rounded-full text-sm font-medium transition-all" :class="emailFilter===cat.value ? 'bg-primary text-white' : 'bg-white border border-outline-variant text-on-surface-variant hover:border-primary/30'">{{cat.label}}</button>
+            </div>
+            <div v-if="emails.length===0" class="text-center text-on-surface-variant/40 py-16">
+              <span class="material-symbols-outlined text-5xl mb-4 block">mail</span>
+              <p class="text-lg">暂无邮件记录</p>
+            </div>
+            <div class="space-y-3">
+              <div v-for="em in emails" :key="em.id" class="glass-panel p-4 rounded-2xl border-l-4" :class="{'border-l-primary': em.category==='academic', 'border-l-green-500': em.category==='club', 'border-l-orange-500': em.category==='admin', 'border-l-error': em.important===1, 'border-l-outline-variant': !['academic','club','admin'].includes(em.category) && em.important!==1}">
+                <div class="flex justify-between items-start">
+                  <div class="flex-1 min-w-0">
+                    <h4 class="font-label-md text-on-surface font-semibold text-sm mb-1">{{em.subject||'（无主题）'}}</h4>
+                    <p class="text-xs text-on-surface-variant mb-2">发件人：{{em.sender}} · {{em.receivedDate}}</p>
+                    <div class="flex gap-1.5 mb-3 flex-wrap">
+                      <span class="text-[10px] px-2 py-0.5 rounded-full font-medium" :class="{'bg-primary/5 text-primary': em.category==='academic', 'bg-green-50 text-green-600': em.category==='club', 'bg-orange-50 text-orange-500': em.category==='admin', 'bg-surface-container text-on-surface-variant': !['academic','club','admin'].includes(em.category)}">{{categoryLabel(em.category)}}</span>
+                      <span v-if="em.important===1" class="text-[10px] px-2 py-0.5 rounded-full font-medium bg-error/5 text-error">⚠ 重要</span>
+                    </div>
+                    <p class="text-sm text-on-surface-variant leading-relaxed">📝 {{em.summary}}</p>
+                  </div>
+                  <button @click="deleteEmail(em.id)" class="text-on-surface-variant/30 hover:text-error transition-colors flex-shrink-0"><span class="material-symbols-outlined">delete</span></button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ═══════ PLATFORMS: 平台入口 ═══════ -->
+          <div v-if="activeView==='platforms'" class="max-w-5xl">
+            <div class="mb-10">
+              <h2 class="font-display-lg text-on-surface text-4xl font-bold tracking-tight">平台入口</h2>
+              <p class="font-body-md text-on-surface-variant mt-1">BNBU 常用系统 & 自定义作业平台</p>
+            </div>
+            <!-- BNBU Official -->
+            <h3 class="font-headline-md text-on-surface text-xl font-semibold mb-5 flex items-center gap-2">
+              <span class="material-symbols-outlined text-primary">account_balance</span> BNBU 常用入口
+            </h3>
+            <div class="grid grid-cols-3 gap-5 mb-10">
+              <div @click="openUrl('https://bnbu.edu.cn/index.htm')" class="glass-panel p-6 rounded-3xl hover:shadow-xl transition-all cursor-pointer overflow-hidden relative group border-2 border-primary/15">
+                <div class="absolute -right-4 -top-4 w-20 h-20 bg-primary/10 rounded-full group-hover:scale-150 transition-transform duration-500"></div>
+                <span class="material-symbols-outlined text-primary text-3xl mb-3 block">school</span>
+                <h4 class="font-label-md text-on-surface font-semibold">BNBU 校园主站</h4>
+                <p class="font-body-sm text-on-surface-variant/60 text-xs mt-1">查老师邮箱 · 教务处 · 学校公告</p>
+              </div>
+              <div @click="openUrl('https://ispace.uic.edu.cn')" class="glass-panel p-6 rounded-3xl hover:shadow-xl transition-all cursor-pointer overflow-hidden relative group">
+                <div class="absolute -right-4 -top-4 w-20 h-20 bg-primary/5 rounded-full group-hover:scale-150 transition-transform duration-500"></div>
+                <span class="material-symbols-outlined text-primary text-3xl mb-3 block">book_online</span>
+                <h4 class="font-label-md text-on-surface font-semibold">iSpace</h4>
+                <p class="font-body-sm text-on-surface-variant/60 text-xs mt-1">作业提交 & 课程资料</p>
+              </div>
+              <div @click="openUrl('https://mis.uic.edu.cn/mis/login.jsp?login_error=3')" class="glass-panel p-6 rounded-3xl hover:shadow-xl transition-all cursor-pointer overflow-hidden relative group">
+                <div class="absolute -right-4 -top-4 w-20 h-20 bg-primary/5 rounded-full group-hover:scale-150 transition-transform duration-500"></div>
+                <span class="material-symbols-outlined text-primary text-3xl mb-3 block">badge</span>
+                <h4 class="font-label-md text-on-surface font-semibold">UIC MIS</h4>
+                <p class="font-body-sm text-on-surface-variant/60 text-xs mt-1">选课系统</p>
+              </div>
+              <div @click="openUrl('https://lrc.bnbu.edu.cn/')" class="glass-panel p-6 rounded-3xl hover:shadow-xl transition-all cursor-pointer overflow-hidden relative group">
+                <div class="absolute -right-4 -top-4 w-20 h-20 bg-primary/5 rounded-full group-hover:scale-150 transition-transform duration-500"></div>
+                <span class="material-symbols-outlined text-primary text-3xl mb-3 block">local_library</span>
+                <h4 class="font-label-md text-on-surface font-semibold">学习资源中心</h4>
+                <p class="font-body-sm text-on-surface-variant/60 text-xs mt-1">LRC 图书馆</p>
+              </div>
+            </div>
+            <!-- Custom Platforms -->
+            <div class="flex justify-between items-end mb-5">
+              <h3 class="font-headline-md text-on-surface text-xl font-semibold flex items-center gap-2">
+                <span class="material-symbols-outlined text-primary">dns</span> 作业提交平台
+              </h3>
+              <button @click="showAddPlatform=true" class="px-4 py-2 glass-panel rounded-xl font-label-md text-primary text-sm hover:bg-primary/5 transition-all flex items-center gap-1.5">
+                <span class="material-symbols-outlined">add</span> 添加
+              </button>
+            </div>
+            <div v-if="customPlatforms.length===0" class="text-center text-on-surface-variant/40 py-10 bg-white/30 rounded-2xl border border-dashed border-outline-variant">
+              <span class="material-symbols-outlined text-4xl mb-2 block">add_circle</span>
+              <p class="text-sm">还没有自定义平台，点击「添加」创建</p>
+            </div>
+            <div class="grid grid-cols-3 gap-4">
+              <div v-for="p in customPlatforms" :key="p.id" class="glass-panel p-5 rounded-2xl text-center cursor-pointer hover:shadow-lg hover:border-primary/20 transition-all relative group">
+                <button @click.stop="deletePlatform(p.id)" class="absolute top-2 right-2 text-on-surface-variant/20 hover:text-error transition-colors opacity-0 group-hover:opacity-100">
+                  <span class="material-symbols-outlined text-sm">close</span>
+                </button>
+                <div @click="openUrl(p.platformUrl)">
+                  <span class="material-symbols-outlined text-primary text-3xl mb-3 block">school</span>
+                  <h4 class="font-label-md text-on-surface font-semibold text-sm">{{p.platformName}}</h4>
+                  <p class="font-body-sm text-on-surface-variant/50 text-xs mt-1 truncate">{{p.description||p.platformUrl}}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== MODALS ====== -->
+  <!-- Add DDL -->
+  <div v-if="showAddDdl" class="fixed inset-0 bg-black/20 backdrop-blur-sm z-[300] flex items-center justify-center" @click.self="showAddDdl=false">
+    <div class="bg-white rounded-2xl p-6 w-[400px] max-h-[80vh] overflow-y-auto shadow-2xl border border-outline-variant/30">
+      <h4 class="font-headline-md text-on-surface text-lg font-semibold mb-5 flex items-center gap-2">
+        <span class="material-symbols-outlined text-primary">add_alert</span> 添加 DDL
+      </h4>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs text-on-surface-variant font-medium mb-1.5">任务名称</label>
+          <input v-model="newDdl.title" @keyup.enter="confirmAddDdl" placeholder="如：Python 作业提交" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all">
+        </div>
+        <div>
+          <label class="block text-xs text-on-surface-variant font-medium mb-1.5">截止日期</label>
+          <input type="date" v-model="newDdl.datePart" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all">
+        </div>
+        <div>
+          <label class="block text-xs text-on-surface-variant font-medium mb-1.5">截止时间</label>
+          <input type="time" v-model="newDdl.timePart" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all">
+        </div>
+        <p class="text-xs text-on-surface-variant/50">预览：{{newDdl.datePart}} {{newDdl.timePart||'23:59'}}</p>
+      </div>
+      <div class="flex gap-3 mt-6 justify-end">
+        <button @click="showAddDdl=false" class="px-5 py-2.5 rounded-xl text-on-surface-variant hover:bg-surface-container-high transition-colors text-sm font-medium">取消</button>
+        <button @click="confirmAddDdl" class="px-5 py-2.5 bg-primary text-white rounded-xl font-medium text-sm hover:brightness-110 transition-all shadow-sm shadow-primary/20">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Grade -->
+  <div v-if="showAddGrade" class="fixed inset-0 bg-black/20 backdrop-blur-sm z-[300] flex items-center justify-center" @click.self="showAddGrade=false">
+    <div class="bg-white rounded-2xl p-6 w-[400px] max-h-[80vh] overflow-y-auto shadow-2xl border border-outline-variant/30">
+      <h4 class="font-headline-md text-on-surface text-lg font-semibold mb-5 flex items-center gap-2">
+        <span class="material-symbols-outlined text-primary">school</span> 录入课程成绩
+      </h4>
+      <div class="space-y-4">
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">课程名称</label><input v-model="newGrade.courseName" placeholder="如：高等数学A" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all"></div>
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">学分</label><input type="number" v-model="newGrade.credits" placeholder="如：3" min="0.5" max="8" step="0.5" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all"></div>
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">等级成绩</label>
+          <select v-model="newGrade.score" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all">
+            <option value="">选择等级</option>
+            <option value="A">A (90-100)</option>
+            <option value="A-">A- (85-89)</option>
+            <option value="B+">B+ (80-84)</option>
+            <option value="B">B (75-79)</option>
+            <option value="B-">B- (70-74)</option>
+            <option value="C+">C+ (65-69)</option>
+            <option value="C">C (60-64)</option>
+            <option value="C-">C- (55-59)</option>
+            <option value="D">D (50-54)</option>
+            <option value="F">F (&lt;50)</option>
+          </select>
+        </div>
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">学年学期（选填）</label><input v-model="newGrade.semester" placeholder="如：2025-2026-2" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all"></div>
+      </div>
+      <div class="flex gap-3 mt-6 justify-end">
+        <button @click="showAddGrade=false" class="px-5 py-2.5 rounded-xl text-on-surface-variant hover:bg-surface-container-high transition-colors text-sm font-medium">取消</button>
+        <button @click="confirmAddGrade" class="px-5 py-2.5 bg-primary text-white rounded-xl font-medium text-sm hover:brightness-110 transition-all shadow-sm shadow-primary/20">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Review -->
+  <div v-if="showAddReview" class="fixed inset-0 bg-black/20 backdrop-blur-sm z-[300] flex items-center justify-center" @click.self="showAddReview=false">
+    <div class="bg-white rounded-2xl p-6 w-[400px] max-h-[80vh] overflow-y-auto shadow-2xl border border-outline-variant/30">
+      <h4 class="font-headline-md text-on-surface text-lg font-semibold mb-5 flex items-center gap-2">
+        <span class="material-symbols-outlined text-primary">rate_review</span> 添加课程评价
+      </h4>
+      <div class="space-y-4">
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">课程名称</label><input v-model="newReview.courseName" placeholder="如：数据结构" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all"></div>
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">评分</label>
+          <select v-model="newReview.rating" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all">
+            <option :value="5">⭐⭐⭐⭐⭐ 5分</option><option :value="4">⭐⭐⭐⭐ 4分</option><option :value="3">⭐⭐⭐ 3分</option><option :value="2">⭐⭐ 2分</option><option :value="1">⭐ 1分</option>
+          </select>
+        </div>
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">评价内容</label><textarea v-model="newReview.comment" rows="3" placeholder="分享你的选课感受..." class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all resize-none"></textarea></div>
+      </div>
+      <div class="flex gap-3 mt-6 justify-end">
+        <button @click="showAddReview=false" class="px-5 py-2.5 rounded-xl text-on-surface-variant hover:bg-surface-container-high transition-colors text-sm font-medium">取消</button>
+        <button @click="confirmAddReview" class="px-5 py-2.5 bg-primary text-white rounded-xl font-medium text-sm hover:brightness-110 transition-all shadow-sm shadow-primary/20">发布</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Email -->
+  <div v-if="showAddEmail" class="fixed inset-0 bg-black/20 backdrop-blur-sm z-[300] flex items-center justify-center" @click.self="showAddEmail=false">
+    <div class="bg-white rounded-2xl p-6 w-[440px] max-h-[80vh] overflow-y-auto shadow-2xl border border-outline-variant/30">
+      <h4 class="font-headline-md text-on-surface text-lg font-semibold mb-5 flex items-center gap-2">
+        <span class="material-symbols-outlined text-primary">mail</span> 粘贴邮件内容
+      </h4>
+      <div class="space-y-4">
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">发件人</label><input v-model="newEmail.sender" placeholder="如：library@uic.edu.cn" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all"></div>
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">主题</label><input v-model="newEmail.subject" placeholder="邮件主题" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all"></div>
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">正文</label><textarea v-model="newEmail.body" rows="5" placeholder="粘贴邮件正文，AI 将自动分类并生成摘要..." class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all resize-none"></textarea></div>
+      </div>
+      <div class="flex gap-3 mt-6 justify-end">
+        <button @click="showAddEmail=false" class="px-5 py-2.5 rounded-xl text-on-surface-variant hover:bg-surface-container-high transition-colors text-sm font-medium">取消</button>
+        <button @click="confirmAddEmail" :disabled="emailProcessing" class="px-5 py-2.5 bg-primary text-white rounded-xl font-medium text-sm hover:brightness-110 transition-all shadow-sm shadow-primary/20 disabled:opacity-50">
+          {{emailProcessing ? 'AI 处理中...' : '✨ AI 处理'}}
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Platform -->
+  <div v-if="showAddPlatform" class="fixed inset-0 bg-black/20 backdrop-blur-sm z-[300] flex items-center justify-center" @click.self="showAddPlatform=false">
+    <div class="bg-white rounded-2xl p-6 w-[400px] max-h-[80vh] overflow-y-auto shadow-2xl border border-outline-variant/30">
+      <h4 class="font-headline-md text-on-surface text-lg font-semibold mb-5 flex items-center gap-2">
+        <span class="material-symbols-outlined text-primary">add_circle</span> 添加作业提交平台
+      </h4>
+      <div class="space-y-4">
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">平台名称</label><input v-model="newPlatform.platformName" placeholder="如：Blackboard" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all"></div>
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">平台 URL</label><input v-model="newPlatform.platformUrl" placeholder="如：https://blackboard.example.com" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all"></div>
+        <div><label class="block text-xs text-on-surface-variant font-medium mb-1.5">描述（选填）</label><input v-model="newPlatform.description" placeholder="如：数学作业提交平台" class="w-full px-4 py-2.5 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all"></div>
+        <p class="text-xs text-on-surface-variant/50 bg-surface-container p-3 rounded-xl">💡 添加自定义作业平台便于管理，DDL 可手动录入</p>
+      </div>
+      <div class="flex gap-3 mt-6 justify-end">
+        <button @click="showAddPlatform=false" class="px-5 py-2.5 rounded-xl text-on-surface-variant hover:bg-surface-container-high transition-colors text-sm font-medium">取消</button>
+        <button @click="confirmAddPlatform" class="px-5 py-2.5 bg-primary text-white rounded-xl font-medium text-sm hover:brightness-110 transition-all shadow-sm shadow-primary/20">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Schedule Parser Modal -->
+  <div v-if="showScheduleParser" class="fixed inset-0 bg-black/20 backdrop-blur-sm z-[300] flex items-center justify-center" @click.self="showScheduleParser=false">
+    <div class="bg-white rounded-2xl p-6 w-[520px] max-h-[85vh] overflow-y-auto shadow-2xl border border-outline-variant/30">
+      <h4 class="font-headline-md text-on-surface text-lg font-semibold mb-5 flex items-center gap-2">
+        <span class="material-symbols-outlined text-primary">auto_awesome</span> 智能识别课表
+      </h4>
+      <p class="text-xs text-on-surface-variant/60 mb-4">粘贴课表文字，自动识别课程名称、上课时间、教室位置。<br>支持格式：<code class="bg-surface-container px-1.5 py-0.5 rounded text-[11px]">周一 08:00-09:40 高等数学A T101</code></p>
+      <textarea v-model="scheduleRawText" rows="10" placeholder="粘贴课表文字，例如：
+周一 08:00-09:40 高等数学A T101
+周一 10:00-11:40 大学英语 C202
+周二 08:00-09:40 数据结构 E301" class="w-full px-4 py-3 bg-surface-container rounded-xl border border-outline-variant focus:border-primary focus:ring-2 focus:ring-primary/10 text-sm outline-none transition-all resize-none font-mono"></textarea>
+      <div v-if="parsedSchedule.length>0" class="mt-4">
+        <h5 class="font-label-md text-on-surface text-sm font-semibold mb-3">识别结果（{{parsedSchedule.length}} 门课程）</h5>
+        <div class="space-y-2 max-h-[200px] overflow-y-auto">
+          <div v-for="(c,idx) in parsedSchedule" :key="idx" class="flex items-center gap-2 bg-surface-container rounded-xl p-2.5 text-xs">
+            <span class="text-on-surface-variant/40 text-[10px] w-8">{{c.dayLabel}}</span>
+            <span class="font-semibold text-on-surface flex-1 truncate">{{c.name}}</span>
+            <span class="text-on-surface-variant/50">{{c.time}}</span>
+            <span class="text-primary bg-primary/5 px-2 py-0.5 rounded-full font-medium">{{c.location}}</span>
+            <button @click="parsedSchedule.splice(idx,1)" class="text-on-surface-variant/20 hover:text-error transition-colors flex-shrink-0"><span class="material-symbols-outlined text-sm">close</span></button>
+          </div>
+        </div>
+      </div>
+      <div class="flex gap-3 mt-6 justify-between">
+        <div class="flex gap-2">
+          <button @click="parseScheduleText" class="px-4 py-2.5 bg-surface-container rounded-xl text-on-surface-variant font-medium text-sm hover:bg-surface-container-high transition-colors flex items-center gap-1.5">
+            <span class="material-symbols-outlined text-sm">auto_awesome</span> 识别
+          </button>
+          <button @click="loadMockSchedule(); showScheduleParser=false" class="px-4 py-2.5 rounded-xl text-on-surface-variant/50 font-medium text-sm hover:text-on-surface-variant transition-colors">加载示例</button>
+        </div>
+        <div class="flex gap-2">
+          <button @click="showScheduleParser=false; scheduleRawText=''; parsedSchedule=[]" class="px-5 py-2.5 rounded-xl text-on-surface-variant hover:bg-surface-container-high transition-colors text-sm font-medium">取消</button>
+          <button @click="confirmScheduleParsed" :disabled="parsedSchedule.length===0" class="px-5 py-2.5 bg-primary text-white rounded-xl font-medium text-sm hover:brightness-110 transition-all shadow-sm shadow-primary/20 disabled:opacity-40 disabled:cursor-not-allowed">应用课表</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const { createApp, ref, reactive, computed, onMounted, onUnmounted, nextTick } = Vue;
+const API = 'http://localhost:8080';
+const OCR_API = 'http://localhost:8766';
+
+createApp({
+    setup() {
+        const activeView = ref('home');
+
+        function showDesktopNotification(title, body) {
+            if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+                new Notification(title, { body, icon: null });
+            } else if (typeof Notification !== 'undefined' && Notification.permission !== 'denied') {
+                Notification.requestPermission().then(perm => {
+                    if (perm === 'granted') new Notification(title, { body });
+                });
+            }
+        }
+
+        const scheduleCourses = ref([]);
+        const showScheduleParser = ref(false);
+        const scheduleRawText = ref('');
+        const parsedSchedule = ref([]);
+        const scheduleDragOver = ref(false);
+        const scheduleImageData = ref(null);
+        const scheduleImageName = ref('');
+        
+        // ════════════════════════════════════
+        //  上课提醒功能 (Class Reminder)
+        // ════════════════════════════════════
+        const classReminder = ref({
+            show: false,
+            courseName: '',
+            room: '',
+            time: '',
+            countdown: ''
+        });
+        let classReminderTimer = null;
+        let remindedCourses = new Set(); // 避免重复提醒同一节课
+        
+        const dayNameMap = { 0:'sun', 1:'mon', 2:'tue', 3:'wed', 4:'thu', 5:'fri', 6:'sat' };
+        const dayLabelMapFull = { mon:'周一', tue:'周二', wed:'周三', thu:'周四', fri:'周五', sat:'周六', sun:'周日' };
+        
+        function checkClassReminder() {
+            const now = new Date();
+            const today = dayNameMap[now.getDay()]; // 'mon', 'tue', etc.
+            const currentMinutes = now.getHours() * 60 + now.getMinutes();
+            
+            // Reset reminded courses if it's a new day (simple: reset every day at midnight)
+            // Actually we use a more granular approach - clear reminders older than 2 hours
+            
+            for (const course of scheduleCourses.value) {
+                // Skip courses that don't match today
+                if (course.day !== today) continue;
+                
+                // Parse start_time if available (new Sections format)
+                let startMinutes = 0;
+                let courseTimeStr = '';
+                
+                if (course.start_time) {
+                    const match = course.start_time.match(/(\d{1,2}):(\d{2})/);
+                    if (match) {
+                        startMinutes = parseInt(match[1]) * 60 + parseInt(match[2]);
+                        courseTimeStr = course.start_time;
+                    }
+                } else if (course.period) {
+                    // Fallback to period mapping
+                    const periodTimeMap = {
+                        1: { start: 8*60 + 0, end: 9*60 + 40, str: '08:00' },
+                        2: { start: 10*60 + 0, end: 11*60 + 40, str: '10:00' },
+                        3: { start: 12*60 + 0, end: 13*60 + 30, str: '12:00' },
+                        4: { start: 14*60 + 0, end: 15*60 + 40, str: '14:00' },
+                        5: { start: 16*60 + 0, end: 17*60 + 40, str: '16:00' }
+                    };
+                    const pt = periodTimeMap[course.period];
+                    if (pt) {
+                        startMinutes = pt.start;
+                        courseTimeStr = pt.str;
+                    }
+                }
+                
+                if (!startMinutes) continue;
+                
+                // Calculate time difference
+                const diff = startMinutes - currentMinutes;
+                
+                // If class starts within 15 minutes (and hasn't been reminded yet)
+                const reminderKey = `${course.name}-${course.day}-${course.start_time || course.period}`;
+                
+                if (diff > 0 && diff <= 15 && !remindedCourses.has(reminderKey)) {
+                    // Trigger reminder!
+                    remindedCourses.add(reminderKey);
+                    
+                    const endStr = course.end_time || '';
+                    classReminder.value = {
+                        show: true,
+                        courseName: course.name,
+                        room: course.location || '未知教室',
+                        time: `${dayLabelMapFull[course.day] || course.day} ${courseTimeStr}${endStr ? '-' + endStr : ''}`,
+                        countdown: `${diff} 分钟后开始`
+                    };
+                    
+                    // Also try browser notification
+                    sendNotification(
+                        `🔔 上课提醒：${course.name}`,
+                        `将在 ${diff} 分钟后开始 · 教室：${course.location || '未知'}`
+                    );
+                    
+                    break; // Only remind one course at a time
+                }
+                
+                // Auto-dismiss reminder after class has started (+5 min buffer)
+                if (diff < -5 && classReminder.value.show) {
+                    // Check if this is the currently shown course
+                    if (classReminder.value.courseName === course.name) {
+                        classReminder.value.show = false;
+                    }
+                }
+            }
+            
+            // Clean up old reminder keys (keep only recent ones)
+            if (remindedCourses.size > 50) {
+                const newArray = Array.from(remindedCourses).slice(-20);
+                remindedCourses = new Set(newArray);
+            }
+        }
+        
+        function dismissClassReminder() {
+            classReminder.value.show = false;
+        }
+        
+        function startClassReminderTimer() {
+            // Check every 30 seconds
+            classReminderTimer = setInterval(checkClassReminder, 30000);
+            // Also check immediately on start
+            setTimeout(checkClassReminder, 2000);
+        }
+        
+        function stopClassReminderTimer() {
+            if (classReminderTimer) {
+                clearInterval(classReminderTimer);
+                classReminderTimer = null;
+            }
+        }
+
+        const timeSlots = [
+            { time:'08:00-09:40', period:1 }, { time:'10:00-11:40', period:2 },
+            { time:'12:00-13:30', period:3 }, { time:'14:00-15:40', period:4 },
+            { time:'16:00-17:40', period:5 }
+        ];
+        function getCoursesAt(day, period) {
+            return scheduleCourses.value.filter(c => c.day===day && c.period===period);
+        }
+
+        // Schedule Image Upload
+        function openScheduleUpload() {
+            // Open text parser modal as secondary option
+            showScheduleParser.value = true;
+            scheduleRawText.value = '';
+            parsedSchedule.value = [];
+        }
+        function triggerScheduleFileInput() {
+            document.getElementById('scheduleFileInput').click();
+        }
+        function readScheduleFile(file) {
+            if (!file || !file.type.startsWith('image/')) return;
+            scheduleImageName.value = file.name;
+            const reader = new FileReader();
+            reader.onload = (e) => { scheduleImageData.value = e.target.result; };
+            reader.readAsDataURL(file);
+        }
+        function handleScheduleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) readScheduleFile(file);
+            event.target.value = '';
+        }
+        function handleScheduleDrop(event) {
+            scheduleDragOver.value = false;
+            const file = event.dataTransfer.files[0];
+            if (file) readScheduleFile(file);
+        }
+        function clearScheduleImage() {
+            scheduleImageData.value = null;
+            scheduleImageName.value = '';
+            scheduleOcrResults.value = [];
+            scheduleOcrError.value = '';
+        }
+
+        // ===== AI OCR =====
+        const scheduleOcrRunning = ref(false);
+        const scheduleOcrProgress = ref(0);
+        const scheduleOcrStatus = ref('');
+        const scheduleOcrResults = ref([]);
+        const scheduleOcrError = ref('');
+
+        const dayLabelMap = { mon:'周一', tue:'周二', wed:'周三', thu:'周四', fri:'周五' };
+        const periodTimes = { 1:'08:00-09:40', 2:'10:00-11:40', 3:'12:00-13:30', 4:'14:00-15:40', 5:'16:00-17:40' };
+
+        function dayLabel(day) { return dayLabelMap[day] || day; }
+        function periodLabel(p) { return periodTimes[p] || '时段'+p; }
+
+        async function recognizeSchedule() {
+            if (!scheduleImageData.value) return;
+            scheduleOcrRunning.value = true;
+            scheduleOcrProgress.value = 5;
+            scheduleOcrStatus.value = '检查 OCR 服务连接...';
+            scheduleOcrError.value = '';
+            scheduleOcrResults.value = [];
+
+            try {
+                // Step 1: Check if OCR server is alive
+                try {
+                    const hres = await fetch(`${OCR_API}/health`);
+                    if (!hres.ok) throw new Error('Health check failed: ' + hres.status);
+                } catch {
+                    scheduleOcrError.value = 'OCR 服务未运行 (端口 8766)。\n\n请先启动：python ocr_server.py\n或双击 start.bat';
+                    scheduleOcrRunning.value = false;
+                    return;
+                }
+
+                // Step 2: Get server status
+                scheduleOcrStatus.value = '查询 OCR 环境...';
+                scheduleOcrProgress.value = 15;
+                let serverStatus = {};
+                try {
+                    const sres = await fetch(`${OCR_API}/status`);
+                    serverStatus = await sres.json();
+                } catch {}
+
+                // Step 3: Send image for OCR
+                scheduleOcrProgress.value = 30;
+                scheduleOcrStatus.value = 'OCR 识别中...';
+
+                const res = await fetch(`${OCR_API}/ocr`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: scheduleImageData.value })
+                });
+
+                scheduleOcrProgress.value = 70;
+                const data = await res.json();
+
+                if (data.error) {
+                    let errMsg = data.error;
+                    if (serverStatus.tesseract === false) {
+                        errMsg = 'Tesseract OCR 未安装或未找到。\n\n1. 下载 Tesseract:\n   https://github.com/UB-Mannheim/tesseract/releases\n2. 安装时勾选 "Add to PATH"\n3. 运行: pip install pytesseract Pillow\n4. 重启 OCR 服务器';
+                    } else if (serverStatus.pil === false) {
+                        errMsg = 'Pillow 库未安装。\n运行: pip install Pillow';
+                    }
+                    scheduleOcrError.value = errMsg;
+                    scheduleOcrRunning.value = false;
+                    return;
+                }
+
+                scheduleOcrStatus.value = '解析课程信息...';
+                scheduleOcrProgress.value = 90;
+
+                const courses = (data.courses || []).map(c => ({
+                    name: c.name,
+                    day: c.day || 'mon',
+                    period: c.period || 1,
+                    location: c.location || '',
+                    start_time: c.start_time || '',
+                    end_time: c.end_time || '',
+                    confirmed: false
+                }));
+
+                scheduleOcrResults.value = courses;
+                scheduleOcrProgress.value = 100;
+
+                if (courses.length === 0) {
+                    scheduleOcrError.value = '⚠️ 未识别到课程信息。\n\n可能原因：\n• 图片不清晰或反光/倾斜\n• 课表格式与标准格式差异较大\n• OCR 服务版本过旧\n\n建议：\n• 重新上传清晰的课表截图\n• 或点击「手动输入」按钮，粘贴课表文字';
+                } else {
+                    scheduleOcrStatus.value = `识别完成！共 ${courses.length} 门课程`;
+                }
+
+            } catch (e) {
+                console.error('OCR Error:', e);
+                scheduleOcrError.value = '无法连接到 OCR 服务 (http://localhost:8766)。\n\n请先启动 OCR 服务：\n  cd bnbu-assistant\n  python ocr_server.py\n\n或直接双击 start.bat 启动（会自动启动 OCR）。';
+            } finally {
+                scheduleOcrRunning.value = false;
+            }
+        }
+
+        function confirmScheduleOcr() {
+            const confirmed = scheduleOcrResults.value.filter(c => c.confirmed);
+            scheduleCourses.value = [...scheduleCourses.value, ...confirmed];
+            scheduleOcrResults.value = [];
+            scheduleImageData.value = null;
+            scheduleImageName.value = '';
+        }
+
+        function parseScheduleText() {
+            const text = scheduleRawText.value.trim();
+            if (!text) return;
+            const lines = text.split(/[\n\r]+/).filter(l => l.trim());
+            const dayMap = {
+                '周一': 'mon', '星期二': 'tue', '周三': 'wed', '周四': 'thu', '周五': 'fri',
+                '星期一': 'mon', '星期二': 'tue', '星期三': 'wed', '星期四': 'thu', '星期五': 'fri',
+                'mon': 'mon', 'tue': 'tue', 'wed': 'wed', 'thu': 'thu', 'fri': 'fri'
+            };
+            const dayLabelMap = { mon:'周一', tue:'周二', wed:'周三', thu:'周四', fri:'周五' };
+            const periodMap = { 1:'08:00-09:40', 2:'10:00-11:40', 3:'12:00-13:30', 4:'14:00-15:40', 5:'16:00-17:40' };
+            const results = [];
+            lines.forEach(line => {
+                // Pattern 1: "周一 08:00-09:40 高等数学A T101"
+                // Pattern 2: "周一 第1-2节 高等数学 T101"
+                let day = null, name = null, location = null, timeStr = null, period = null;
+                let remaining = line;
+                // Find day
+                for (const [cn, en] of Object.entries(dayMap)) {
+                    if (remaining.startsWith(cn)) {
+                        day = en;
+                        remaining = remaining.slice(cn.length).trim();
+                        break;
+                    }
+                }
+                if (!day) return;
+                // Try period pattern: "第1-2节"
+                const periodMatch = remaining.match(/第(\d+)-(\d+)节/);
+                if (periodMatch) {
+                    period = parseInt(periodMatch[1]);
+                    timeStr = periodMap[period] || '未知时间';
+                    remaining = remaining.replace(/第\d+-\d+节/, '').trim();
+                } else {
+                    // Try time pattern: "08:00-09:40"
+                    const timeMatch = remaining.match(/^(\d{2}:\d{2})-(\d{2}:\d{2})/);
+                    if (timeMatch) {
+                        timeStr = timeMatch[0];
+                        remaining = remaining.slice(timeMatch[0].length).trim();
+                        // Map time to period
+                        for (const [p, t] of Object.entries(periodMap)) {
+                            if (t === timeStr) { period = parseInt(p); break; }
+                        }
+                        if (!period) period = 0;
+                    }
+                }
+                // Extract location (last token if it looks like a room: starts with letter + digits)
+                const tokens = remaining.split(/\s+/).filter(t => t);
+                if (tokens.length >= 1) {
+                    const last = tokens[tokens.length - 1];
+                    if (/^[A-Za-z]+\d*$/i.test(last) && last.length <= 6) {
+                        location = last;
+                        tokens.pop();
+                    }
+                }
+                // Remaining tokens form the course name
+                name = tokens.join(' ');
+                if (name && day && (timeStr || period)) {
+                    results.push({
+                        day, period: period || 0, name,
+                        location: location || '待确认',
+                        time: timeStr || '待确认',
+                        dayLabel: dayLabelMap[day] || day
+                    });
+                }
+            });
+            parsedSchedule.value = results;
+        }
+        function confirmScheduleParsed() {
+            scheduleCourses.value = parsedSchedule.value.filter(c => c.period > 0 && c.period <= 5);
+            showScheduleParser.value = false;
+            scheduleRawText.value = '';
+            parsedSchedule.value = [];
+        }
+        function loadMockSchedule() {
+            scheduleCourses.value = [
+                { day:'mon', period:1, name:'高等数学A', location:'T101' },
+                { day:'mon', period:3, name:'大学英语', location:'C202' },
+                { day:'tue', period:2, name:'数据结构', location:'E301' },
+                { day:'wed', period:1, name:'线性代数', location:'T102' },
+                { day:'thu', period:4, name:'数据库原理', location:'E303' },
+                { day:'fri', period:2, name:'体育', location:'操场' }
+            ];
+        }
+
+        // ===== Chat =====
+        const chatMessages = ref([{ role:'assistant', content:'你好！我是你的BNBU学习助手。可以问我关于课表、DDL、GPA、邮件等问题～', sources:null }]);
+        const currentQuestion = ref('');
+        const isTyping = ref(false);
+        const chatBox = ref(null);
+        const chatDragOver = ref(false);
+        const chatAttachments = ref([]);
+
+        function newChat() {
+            chatMessages.value = [{ role:'assistant', content:'你好！我是你的BNBU学习助手。可以问我关于课表、DDL、GPA、邮件等问题～', sources:null }];
+        }
+        function quickAsk(question) { currentQuestion.value = question; sendMessage(); }
+
+        // Chat file upload helpers
+        function triggerChatFileInput() {
+            document.getElementById('chatFileInput').click();
+        }
+        function addChatFile(file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                chatAttachments.value.push({
+                    name: file.name,
+                    type: file.type.startsWith('image/') ? 'image' : 'file',
+                    dataUrl: e.target.result,
+                    fileType: file.type
+                });
+            };
+            reader.readAsDataURL(file);
+        }
+        function handleChatDrop(event) {
+            chatDragOver.value = false;
+            const files = event.dataTransfer.files;
+            for (let i = 0; i < files.length; i++) {
+                addChatFile(files[i]);
+            }
+        }
+        function handleChatFileSelect(event) {
+            const files = event.target.files;
+            for (let i = 0; i < files.length; i++) {
+                addChatFile(files[i]);
+            }
+            event.target.value = '';
+        }
+        function removeChatAttachment(idx) {
+            chatAttachments.value.splice(idx, 1);
+        }
+
+        async function sendMessage() {
+            const q = currentQuestion.value.trim();
+            const hasAttachments = chatAttachments.value.length > 0;
+            if (!q && !hasAttachments) return;
+
+            // Build user message with attachments
+            const userMsg = { role:'user', content:q || '', sources:null };
+            if (hasAttachments) {
+                const img = chatAttachments.value.find(a => a.type === 'image');
+                if (img) userMsg.image = img.dataUrl;
+                const file = chatAttachments.value.find(a => a.type === 'file');
+                if (file) userMsg.file = { name: file.name };
+            }
+            chatMessages.value.push(userMsg);
+            const attCount = chatAttachments.value.length;
+            chatAttachments.value = [];
+            currentQuestion.value = '';
+            isTyping.value = true;
+            await nextTick();
+            scrollChat();
+            setTimeout(() => {
+                let reply = '';
+                const ql = (q + (attCount > 0 ? ' 有附件' : '')).toLowerCase();
+                if (attCount > 0) reply = '收到你发送的文件啦！我会尽快处理。如需我识别课表图片，请前往「课程表」页面拖入截图。';
+                else if (ql.includes('课表')||ql.includes('schedule')) reply='你可以在「课程表」页面拖入课表截图，AI 将自动识别课程信息。';
+                else if (ql.includes('gpa')||ql.includes('绩点')) reply='前往「GPA 计算」页面录入各科成绩即可计算 sGPA/cGPA，设置目标后获取选课建议。';
+                else if (ql.includes('ddl')||ql.includes('截止')) reply='在「学术主页」和「DDL 提醒」页面查看所有截止日期，精确到分钟。紧急 DDL (< 1小时) 会有红色悬浮窗提醒。';
+                else if (ql.includes('请假')||ql.includes('absent')) reply='请假流程：登录 iSpace → 学工系统 → 填写请假单。可在「平台入口」找到快捷链接。';
+                else if (ql.includes('平台')||ql.includes('作业提交')) reply='前往「平台入口」管理你的作业提交平台，DDL 可在此手动录入。';
+                else if (ql.includes('选课')||ql.includes('mis')) reply='选课请登录 UIC MIS。选课截止日期会自动加入 DDL 提醒。';
+                else if (ql.includes('图书馆')||ql.includes('预约')||ql.includes('座位')) reply='图书馆预约：登录「学习资源中心 LRC」网站 → 座位预约系统 → 选择时间 → 确认预约。';
+                else reply='这是 BNBU 智能助手。关于选课、课程、图书馆等问题随时问我！也可以拖入文件/图片到对话框哦～';
+                chatMessages.value.push({ role:'assistant', content:reply, sources:null });
+                isTyping.value = false;
+                scrollChat();
+            }, 700);
+        }
+        function scrollChat() {
+            nextTick(() => {
+                const el = chatBox.value;
+                if (el) el.scrollTop = el.scrollHeight;
+            });
+        }
+
+        // ===== DDL =====
+        const ddlList = ref([]);
+        const showAddDdl = ref(false);
+        const newDdl = ref({ title:'', datePart:'', timePart:'23:59' });
+        const urgentDismissed = ref(false);
+        let ddlPollTimer = null;
+        const doneDdlIds = reactive(new Set());
+        const ddlNotifyState = reactive(new Map());
+
+        const urgentTotal = computed(() => ddlList.value.filter(d => d.done===0 && d.urgencyLevel==='urgent').length);
+        const warnTotal = computed(() => ddlList.value.filter(d => d.done===0 && d.urgencyLevel==='warn').length);
+        const allDdlCount = computed(() => ddlList.value.filter(d => d.done===0).length);
+
+        const topDdls = computed(() => {
+            const active = ddlList.value.filter(d => d.done===0);
+            const urgent = active.filter(d => d.urgencyLevel==='urgent');
+            const warn = active.filter(d => d.urgencyLevel==='warn');
+            const rest = active.filter(d => d.urgencyLevel!=='urgent' && d.urgencyLevel!=='warn');
+            return [...urgent, ...warn, ...rest].slice(0, 5);
+        });
+        const urgentDdlList = computed(() => ddlList.value.filter(d => d.done===0 && d.urgencyLevel==='urgent'));
+        const warnDdlList = computed(() => ddlList.value.filter(d => d.done===0 && d.urgencyLevel==='warn'));
+        const activeUrgentDdl = computed(() => {
+            if (urgentDismissed.value) return null;
+            return urgentDdlList.value[0] || null;
+        });
+
+        const urgentCountdownText = ref('');
+        let countdownTimer = null;
+        function updateCountdown() {
+            const ddl = activeUrgentDdl.value;
+            if (!ddl || ddl.minutesLeft <= 0) { urgentCountdownText.value = '已过期'; return; }
+            const mins = ddl.minutesLeft;
+            if (mins >= 60) {
+                const hrs = Math.floor(mins / 60);
+                urgentCountdownText.value = hrs + ' 小时 ' + (mins % 60) + ' 分钟';
+            } else {
+                urgentCountdownText.value = mins < 1 ? '< 1 分钟' : (mins === 1 ? '1 分钟' : mins + ' 分钟');
+            }
+        }
+        function recalcDdlTimers() {
+            const now = new Date();
+            ddlList.value.forEach(d => {
+                if (d.done === 1) return;
+                const due = new Date(d.dueDate);
+                const diff = due - now;
+                const min = Math.floor(diff / 60000);
+                const hr = Math.floor(min / 60);
+                const day = Math.floor(hr / 24);
+                d.minutesLeft = min;
+                d.hoursLeft = hr;
+                d.daysLeft = day;
+                if (min < 0) { d.urgencyLevel = 'expired'; d.displayText = '已过期'; }
+                else if (min < 60) { d.urgencyLevel = 'urgent'; d.displayText = min + ' 分钟'; }
+                else if (min < 1440) { d.urgencyLevel = 'warn'; d.displayText = hr + ' 小时 ' + (min % 60) + ' 分钟'; }
+                else if (day <= 3) { d.urgencyLevel = 'caution'; d.displayText = day + ' 天 ' + (hr % 24) + ' 小时'; }
+                else { d.urgencyLevel = 'ok'; d.displayText = day + ' 天'; }
+            });
+            // Trigger Vue reactivity for the list items
+            ddlList.value = [...ddlList.value];
+            updateCountdown();
+            checkTieredNotifications();
+        }
+        function startCountdownRefresh() { stopCountdownRefresh(); countdownTimer = setInterval(recalcDdlTimers, 10000); }
+        function stopCountdownRefresh() { if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; } }
+        function dismissUrgent() { urgentDismissed.value = true; setTimeout(() => { urgentDismissed.value = false; }, 300000); }
+        function checkTieredNotifications() {
+            ddlList.value.forEach(d => {
+                if (d.done === 1 || d.minutesLeft <= 0) return;
+                const mins = d.minutesLeft;
+                let tier = null;
+                if (mins <= 5) tier = '5';
+                else if (mins <= 10) tier = '10';
+                else if (mins <= 30) tier = '30';
+                if (!tier) return;
+                const notified = ddlNotifyState.get(d.id) || new Set();
+                if (notified.has(tier)) return;
+                notified.add(tier);
+                ddlNotifyState.set(d.id, notified);
+                const label = tier === '5' ? '紧急' : (tier === '10' ? '重要' : '提醒');
+                showDesktopNotification(`⏰ ${label} · DDL`, `${d.title}\n剩余 ${d.displayText}`);
+            });
+        }
+
+        function sourceLabel(src) {
+            const map = { user:'手动', platform:'平台', calendar:'校历', scrape:'网页提取' };
+            return map[src] || src;
+        }
+
+        let ddlMockLoaded = false;
+        async function loadDdls() {
+            try {
+                const res = await fetch(`${API}/api/ddl/list`);
+                const r = await res.json();
+                if (r.code===200) { ddlList.value = r.data; mergeDoneDdls(); updateCountdown(); return; }
+            } catch(e){}
+            // Only set mock data on first load to keep dueDate stable
+            if (ddlMockLoaded) { updateCountdown(); return; }
+            ddlMockLoaded = true;
+            const now = new Date();
+            const tw = (d) => {
+                const t = new Date(d);
+                const diff = t - now;
+                const min = Math.floor(diff / 60000);
+                const hr = Math.floor(min / 60);
+                const day = Math.floor(hr / 24);
+                let lvl, txt;
+                if (min < 0) { lvl='expired'; txt='已过期'; }
+                else if (min < 60) { lvl='urgent'; txt=min+' 分钟'; }
+                else if (min < 1440) { lvl='warn'; txt=hr+' 小时 '+(min%60)+' 分钟'; }
+                else if (day <= 3) { lvl='caution'; txt=day+' 天 '+ (hr%24) +' 小时'; }
+                else { lvl='ok'; txt=day+' 天'; }
+                return { minutesLeft:min, hoursLeft:hr, daysLeft:day, displayText:txt, urgencyLevel:lvl };
+            };
+            const nearDeadline = new Date(now.getTime() + 55 * 60000);
+            const nearStr = nearDeadline.toISOString().slice(0,10) + ' ' + String(nearDeadline.getHours()).padStart(2,'0') + ':' + String(nearDeadline.getMinutes()).padStart(2,'0');
+            ddlList.value = [
+                { id:1001, title:'Python 作业提交', dueDate:nearStr, source:'platform', done:0, platformName:'iSpace', courseName:null, ...tw(nearStr) },
+                { id:1002, title:'选课截止', dueDate:'2026-06-20 17:00', source:'calendar', done:0, platformName:null, courseName:null, ...tw('2026-06-20 17:00') },
+                { id:1003, title:'转专业申请截止', dueDate:'2026-06-25 23:59', source:'calendar', done:0, platformName:null, courseName:null, ...tw('2026-06-25 23:59') },
+                { id:1004, title:'期末考试周开始', dueDate:'2026-06-30 08:00', source:'calendar', done:0, platformName:null, courseName:null, ...tw('2026-06-30 08:00') },
+                { id:1005, title:'实验报告提交', dueDate:'2026-06-18 18:00', source:'platform', done:0, platformName:'AutoLab', courseName:null, ...tw('2026-06-18 18:00') }
+            ];
+            mergeDoneDdls();
+            updateCountdown();
+        }
+        function mergeDoneDdls() { ddlList.value.forEach(d => { if (doneDdlIds.has(d.id)) d.done = 1; }); }
+        async function confirmAddDdl() {
+            const datePart = newDdl.value.datePart;
+            const timePart = newDdl.value.timePart || '23:59';
+            if (!newDdl.value.title || !datePart) return;
+            const dueDate = datePart + ' ' + timePart;
+            try {
+                const res = await fetch(`${API}/api/ddl/add`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title:newDdl.value.title, dueDate, source:'user' }) });
+                const r = await res.json();
+                if (r.code===200) { await loadDdls(); }
+            } catch(e) {
+                const now = new Date();
+                const target = new Date(dueDate);
+                const min = Math.floor((target - now) / 60000);
+                const hr = Math.floor(min / 60);
+                const day = Math.floor(hr / 24);
+                let lvl = 'ok', txt = day+' 天';
+                if (min < 0) { lvl='expired'; txt='已过期'; }
+                else if (min < 60) { lvl='urgent'; txt=min+' 分钟'; }
+                else if (min < 1440) { lvl='warn'; txt=hr+' 小时 '+(min%60)+' 分钟'; }
+                else if (day <= 3) { lvl='caution'; txt=day+' 天 '+ (hr%24) +' 小时'; }
+                ddlList.value.push({ id:Date.now(), title:newDdl.value.title, dueDate, source:'user', done:0, platformName:null, courseName:null, minutesLeft:min, hoursLeft:hr, daysLeft:day, displayText:txt, urgencyLevel:lvl });
+                ddlList.value.sort((a,b) => a.minutesLeft - b.minutesLeft);
+            }
+            showAddDdl.value=false;
+            newDdl.value={ title:'', datePart:'', timePart:'23:59' };
+            updateCountdown();
+        }
+        async function markDone(id) {
+            doneDdlIds.add(id);
+            try { await fetch(`${API}/api/ddl/done/${id}`, { method:'PUT' }); } catch(e){}
+            const item = ddlList.value.find(d=>d.id===id);
+            if (item) item.done=1;
+            ddlNotifyState.delete(id);
+            updateCountdown();
+        }
+        async function deleteDdl(id) {
+            try { await fetch(`${API}/api/ddl/${id}`, { method:'DELETE' }); } catch(e){}
+            ddlList.value = ddlList.value.filter(d=>d.id!==id);
+            doneDdlIds.delete(id);
+            ddlNotifyState.delete(id);
+            updateCountdown();
+        }
+
+        // ===== Platforms =====
+        const customPlatforms = ref([]);
+        const showAddPlatform = ref(false);
+        const newPlatform = ref({ platformName:'', platformUrl:'', description:'' });
+
+        async function loadPlatforms() {
+            try {
+                const res = await fetch(`${API}/api/platform/list`);
+                const r = await res.json();
+                if (r.code===200) { customPlatforms.value = r.data; return; }
+            } catch(e){}
+            customPlatforms.value = [];
+        }
+        async function confirmAddPlatform() {
+            const { platformName, platformUrl, description } = newPlatform.value;
+            if (!platformName || !platformUrl) return;
+            try {
+                const res = await fetch(`${API}/api/platform/add`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ platformName, platformUrl, description }) });
+                if ((await res.json()).code===200) await loadPlatforms();
+            } catch(e) {
+                customPlatforms.value.push({ id:Date.now(), platformName, platformUrl, description, icon:'fas fa-graduation-cap', sortOrder:99 });
+            }
+            showAddPlatform.value=false;
+            newPlatform.value={ platformName:'', platformUrl:'', description:'' };
+        }
+        async function deletePlatform(id) {
+            try { await fetch(`${API}/api/platform/${id}`, { method:'DELETE' }); } catch(e){}
+            customPlatforms.value = customPlatforms.value.filter(p=>p.id!==id);
+        }
+
+        // ===== GPA =====
+        const gpaResult = ref({ gpa:null, totalCredits:0, courses:[], suggestion:'' });
+        const showAddGrade = ref(false);
+        const newGrade = ref({ courseName:'', credits:'', score:'', semester:'' });
+        const targetGpa = ref(null);
+        const editingTarget = ref(false);
+        const targetGpaInput = ref('');
+        const totalExpectedCredits = ref(130);
+        const gpaSemesterFilter = ref('');
+
+        // Computed: unique semesters from courses
+        const uniqueSemesters = computed(() => {
+            const sems = gpaResult.value.courses.map(c => c.semester).filter(Boolean);
+            return [...new Set(sems)].sort().reverse();
+        });
+
+        // Filtered grades
+        const filteredGrades = computed(() => {
+            const all = gpaResult.value.courses;
+            if (!gpaSemesterFilter.value) return all;
+            return all.filter(c => c.semester === gpaSemesterFilter.value);
+        });
+
+        // Current semester (most recent)
+        const currentSemester = computed(() => {
+            const sems = uniqueSemesters.value;
+            return sems.length > 0 ? sems[0] : '';
+        });
+
+        // sGPA (current semester only)
+        const sGPA = computed(() => {
+            const sem = currentSemester.value;
+            if (!sem) return 0;
+            const courses = gpaResult.value.courses.filter(c => c.semester === sem);
+            if (courses.length === 0) return 0;
+            let tc = 0, ws = 0;
+            courses.forEach(g => { tc += g.credits; ws += g.credits * g.gradePoint; });
+            return tc > 0 ? Math.round(ws / tc * 100) / 100 : 0;
+        });
+
+        const currentSemesterCredits = computed(() => {
+            const sem = currentSemester.value;
+            if (!sem) return 0;
+            return gpaResult.value.courses.filter(c => c.semester === sem).reduce((sum, c) => sum + c.credits, 0);
+        });
+
+        // cGPA (all courses)
+        const cGPA = computed(() => gpaResult.value.gpa || 0);
+
+        // Gap to target
+        const gapToTarget = computed(() => {
+            if (!targetGpa.value || !cGPA.value) return 0;
+            return Math.max(0, Math.round((targetGpa.value - cGPA.value) * 100) / 100);
+        });
+
+        // Required remaining GPA
+        const requiredRemainingGpa = computed(() => {
+            if (!targetGpa.value || gapToTarget.value <= 0) return '—';
+            const done = gpaResult.value.totalCredits || 0;
+            const remaining = totalExpectedCredits.value - done;
+            if (remaining <= 0) return '已无剩余学分';
+            const needed = (targetGpa.value * totalExpectedCredits.value - cGPA.value * done) / remaining;
+            if (needed > 4.0) return '> 4.0 (无法达成)';
+            return needed.toFixed(2);
+        });
+
+        // Grade advice HTML
+        const gradeAdviceHtml = computed(() => {
+            if (!targetGpa.value || gapToTarget.value <= 0) return '你已达到目标 GPA，继续保持当前水平即可！';
+            const done = gpaResult.value.totalCredits || 0;
+            const remaining = totalExpectedCredits.value - done;
+            if (remaining <= 0) return '已无剩余学分可修。';
+            const needed = (targetGpa.value * totalExpectedCredits.value - cGPA.value * done) / remaining;
+            let level = '', strategy = '';
+            if (needed >= 3.7) { level = 'A- 及以上'; strategy = '建议优先选择给分高的通识课，控制每学期难度课数量。'; }
+            else if (needed >= 3.3) { level = 'B+ 及以上'; strategy = '保持专业核心课 B+ 以上，用选修课拉高 GPA。'; }
+            else if (needed >= 3.0) { level = 'B 及以上'; strategy = '合理分配课程难度，关键专业课尽量 B+ 以上。'; }
+            else if (needed >= 2.7) { level = 'B- 及以上'; strategy = '确保所有课程及格以上，重点关注专业课。'; }
+            else { level = 'C+ 及以上'; strategy = '稳定所有课程成绩，优先保证不挂科。'; }
+            return `为达到目标 cGPA <b>${targetGpa.value.toFixed(2)}</b>，剩余 <b>${remaining}</b> 学分课程需保持平均 <b>${needed.toFixed(2)}</b> GPA（约 <b>${level}</b>）。<br><br>📋 <b>策略：</b>${strategy}`;
+        });
+
+        // Grade scenarios
+        const gradeScenarios = computed(() => {
+            if (!targetGpa.value || gapToTarget.value <= 0) return [];
+            const done = gpaResult.value.totalCredits || 0;
+            const remaining = totalExpectedCredits.value - done;
+            if (remaining <= 0) return [];
+            const levels = [
+                { label:'全 A', gradePoint:4.0, desc:'平均 A' },
+                { label:'全 A-', gradePoint:3.7, desc:'平均 A-' },
+                { label:'全 B+', gradePoint:3.3, desc:'平均 B+' },
+                { label:'全 B', gradePoint:3.0, desc:'平均 B' },
+                { label:'全 B-', gradePoint:2.7, desc:'平均 B-' },
+            ];
+            return levels.map(l => {
+                const finalGpa = ((cGPA.value || 0) * done + l.gradePoint * remaining) / totalExpectedCredits.value;
+                return {
+                    ...l,
+                    recommended: finalGpa >= targetGpa.value - 0.005,
+                    resultGpa: finalGpa.toFixed(2)
+                };
+            });
+        });
+
+        function confirmTargetGpa() {
+            const v = targetGpaInput.value;
+            if (v !== null && v >= 0 && v <= 4) targetGpa.value = Math.round(v * 100) / 100;
+            editingTarget.value = false;
+        }
+
+        function scoreToLetter(s) {
+            // If already a letter grade, return it
+            if (typeof s === 'string' && s.length <= 2) return s;
+            // Fallback for numeric scores
+            if (s >= 90) return 'A';
+            if (s >= 85) return 'A-';
+            if (s >= 80) return 'B+';
+            if (s >= 75) return 'B';
+            if (s >= 70) return 'B-';
+            if (s >= 65) return 'C+';
+            if (s >= 60) return 'C';
+            if (s >= 55) return 'C-';
+            if (s >= 50) return 'D';
+            return 'F';
+        }
+
+        const gradePointMap = {
+            'A': 4.0, 'A-': 3.7,
+            'B+': 3.3, 'B': 3.0, 'B-': 2.7,
+            'C+': 2.3, 'C': 2.0, 'C-': 1.7,
+            'D': 1.0, 'F': 0.0
+        };
+        function scoreToGradePoint(s) {
+            if (typeof s === 'string') return gradePointMap[s] ?? 0.0;
+            // Fallback for numeric scores
+            if(s>=90)return 4.0; if(s>=85)return 3.7; if(s>=80)return 3.3;
+            if(s>=75)return 3.0; if(s>=70)return 2.7; if(s>=65)return 2.3;
+            if(s>=60)return 2.0; if(s>=55)return 1.7; if(s>=50)return 1.0;
+            return 0.0;
+        }
+
+        async function calcGpa() {
+            try {
+                const res = await fetch(`${API}/api/gpa/calc`);
+                const r = await res.json();
+                if (r.code===200) { gpaResult.value = r.data; return; }
+            } catch(e){}
+            if (gpaResult.value.courses.length===0) return;
+            let totalC=0, ws=0;
+            gpaResult.value.courses.forEach(g=>{ totalC+=g.credits; ws+=g.credits*g.gradePoint; });
+            const gpa = totalC>0 ? Math.round(ws/totalC*100)/100 : 0;
+            gpaResult.value.gpa = gpa;
+            gpaResult.value.totalCredits = totalC;
+        }
+        async function confirmAddGrade() {
+            const { courseName, credits, score, semester } = newGrade.value;
+            if (!courseName||!credits||!score) return;
+            try {
+                const res = await fetch(`${API}/api/gpa/grade`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ courseName, credits:Number(credits), score, semester }) });
+                if ((await res.json()).code===200) await calcGpa();
+            } catch(e) {
+                const gp = scoreToGradePoint(score);
+                gpaResult.value.courses.push({ id:Date.now(), courseName, credits:Number(credits), score, gradePoint:gp, semester });
+                await calcGpa();
+            }
+            showAddGrade.value=false;
+            newGrade.value={ courseName:'', credits:'', score:'', semester:'' };
+        }
+        async function deleteGrade(id) {
+            try { await fetch(`${API}/api/gpa/grade/${id}`, { method:'DELETE' }); } catch(e){}
+            gpaResult.value.courses = gpaResult.value.courses.filter(g=>g.id!==id);
+            await calcGpa();
+        }
+
+        // ===== Reviews =====
+        const reviews = ref([]);
+        const showAddReview = ref(false);
+        const newReview = ref({ courseName:'', rating:5, comment:'' });
+        async function loadReviews() {
+            try {
+                const res = await fetch(`${API}/api/review/list`);
+                const r = await res.json();
+                if (r.code===200) { reviews.value = r.data; return; }
+            } catch(e){}
+            reviews.value = [
+                { id:1, courseName:'高等数学', rating:4, comment:'老师讲得很清晰，作业适中。', reviewDate:'2026-05-10' },
+                { id:2, courseName:'数据结构', rating:5, comment:'非常实用，实验很有挑战。', reviewDate:'2026-05-15' }
+            ];
+        }
+        async function confirmAddReview() {
+            const { courseName, rating, comment } = newReview.value;
+            if (!courseName || !comment) return;
+            try {
+                const res = await fetch(`${API}/api/review/add`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ courseName, rating:Number(rating), comment }) });
+                if ((await res.json()).code===200) await loadReviews();
+            } catch(e) {
+                reviews.value.unshift({ id:Date.now(), courseName, rating:Number(rating), comment, reviewDate:new Date().toISOString().slice(0,10) });
+            }
+            showAddReview.value=false;
+            newReview.value={ courseName:'', rating:5, comment:'' };
+        }
+        async function deleteReview(id) {
+            try { await fetch(`${API}/api/review/${id}`, { method:'DELETE' }); } catch(e){}
+            reviews.value = reviews.value.filter(r=>r.id!==id);
+        }
+
+        // ===== Email =====
+        const emails = ref([]);
+        const showAddEmail = ref(false);
+        const emailProcessing = ref(false);
+        const newEmail = ref({ sender:'', subject:'', body:'' });
+        const emailFilter = ref('');
+        const emailCategories = [
+            { value:'', label:'全部' }, { value:'academic', label:'学业' },
+            { value:'club', label:'社团' }, { value:'admin', label:'通知' }, { value:'other', label:'其他' }
+        ];
+        function categoryLabel(cat) {
+            const map = { academic:'学业', club:'社团', admin:'通知', other:'其他' };
+            return map[cat]||cat;
+        }
+        async function loadEmails() {
+            try {
+                const url = emailFilter.value ? `${API}/api/email/list?category=${emailFilter.value}` : `${API}/api/email/list`;
+                const res = await fetch(url);
+                const r = await res.json();
+                if (r.code===200) { emails.value = r.data; return; }
+            } catch(e){}
+            emails.value=[];
+        }
+        async function confirmAddEmail() {
+            const { sender, subject, body } = newEmail.value;
+            if (!body && !subject) return;
+            emailProcessing.value=true;
+            try {
+                const res = await fetch(`${API}/api/email/process`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ sender, subject, body }) });
+                if ((await res.json()).code===200) await loadEmails();
+            } catch(e) {
+                const combined = (subject+' '+sender).toLowerCase();
+                let category='other', imp=0;
+                if(combined.includes('作业')||combined.includes('成绩')||combined.includes('考试')){category='academic';imp=1;}
+                else if(combined.includes('社团')||combined.includes('活动')){category='club';}
+                else if(combined.includes('通知')||combined.includes('公告')){category='admin';imp=1;}
+                emails.value.unshift({ id:Date.now(), sender, subject, summary:subject||'（无摘要）', category, important:imp, receivedDate:new Date().toISOString().slice(0,10) });
+            }
+            emailProcessing.value=false;
+            showAddEmail.value=false;
+            newEmail.value={ sender:'', subject:'', body:'' };
+        }
+        async function deleteEmail(id) {
+            try { await fetch(`${API}/api/email/${id}`, { method:'DELETE' }); } catch(e){}
+            emails.value = emails.value.filter(e=>e.id!==id);
+        }
+
+        function openUrl(url) {
+            if (typeof window !== 'undefined' && window.require) {
+                try { const { shell } = window.require('electron'); shell.openExternal(url); return; } catch(e){}
+            }
+            window.open(url, '_blank');
+        }
+
+        function switchView(view) {
+            activeView.value = view;
+            if (view==='home' || view==='ddl') loadDdls();
+            if (view==='gpa') calcGpa();
+            if (view==='reviews') loadReviews();
+            if (view==='email') loadEmails();
+            if (view==='platforms') loadPlatforms();
+        }
+
+        onMounted(() => {
+            loadDdls();
+            loadReviews();
+            loadPlatforms();
+            startCountdownRefresh();
+            startClassReminderTimer(); // 启动上课提醒
+            if (typeof Notification !== 'undefined' && Notification.permission === 'default') { Notification.requestPermission(); }
+            ddlPollTimer = setInterval(() => { loadDdls(); checkTieredNotifications(); }, 60000);
+        });
+
+        onUnmounted(() => { stopCountdownRefresh(); stopClassReminderTimer(); if (ddlPollTimer) { clearInterval(ddlPollTimer); } });
+
+        return {
+            activeView, switchView,
+            scheduleCourses, timeSlots, getCoursesAt, openScheduleUpload,
+            scheduleDragOver, scheduleImageData, scheduleImageName, loadMockSchedule,
+            triggerScheduleFileInput, handleScheduleDrop, handleScheduleFileSelect, clearScheduleImage,
+            recognizeSchedule, scheduleOcrRunning, scheduleOcrProgress, scheduleOcrStatus,
+            scheduleOcrResults, scheduleOcrError, confirmScheduleOcr,
+            dayLabel, periodLabel,
+            showScheduleParser, scheduleRawText, parsedSchedule, parseScheduleText, confirmScheduleParsed,
+            // Class Reminder
+            classReminder, dismissClassReminder,
+            chatMessages, currentQuestion, isTyping, chatBox, sendMessage, newChat, quickAsk,
+            chatDragOver, chatAttachments, triggerChatFileInput, handleChatDrop, handleChatFileSelect, removeChatAttachment,
+            ddlList, showAddDdl, newDdl, confirmAddDdl, markDone, deleteDdl,
+            urgentTotal, warnTotal, allDdlCount, topDdls, urgentDdlList, warnDdlList, sourceLabel,
+            activeUrgentDdl, urgentDismissed, urgentCountdownText, dismissUrgent,
+            gpaResult, showAddGrade, newGrade, calcGpa, confirmAddGrade, deleteGrade,
+            targetGpa, editingTarget, targetGpaInput, confirmTargetGpa, totalExpectedCredits,
+            sGPA, cGPA, currentSemester, currentSemesterCredits, gapToTarget,
+            requiredRemainingGpa, gradeAdviceHtml, gradeScenarios, scoreToLetter,
+            gpaSemesterFilter, uniqueSemesters, filteredGrades,
+            reviews, showAddReview, newReview, confirmAddReview, deleteReview,
+            emails, showAddEmail, emailProcessing, newEmail, emailFilter, emailCategories, categoryLabel, loadEmails, confirmAddEmail, deleteEmail,
+            customPlatforms, showAddPlatform, newPlatform, confirmAddPlatform, deletePlatform,
+            openUrl
+        };
+    }
+}).mount('#app');
+</script>
+</body>
+</html>
