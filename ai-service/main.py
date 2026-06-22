@@ -3,19 +3,26 @@ import json
 import os
 import anthropic
 import chromadb
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
+from docx import Document
 from pydantic import BaseModel
+import uuid
+import shutil
+import textract
 
 app = FastAPI()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+UPLOAD_DIR = "./uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 @app.get("/")          # 演示页:浏览器开 http://127.0.0.1:5000/ 就能看到
 def home():
     return FileResponse(os.path.join(BASE_DIR, "index.html"))
 client = anthropic.Anthropic(
-    api_key="sk-ICwd9A5ZvlLAiJ37CFgOFjNbOzqLIpEgLkM6sH2CREDIDzPi",                    # 换成你自己的 key
+    api_key="sk-ICwd9A5ZvlLAiJ37CFgOFjNbOzqLIpEgLkM6sH2CREDIDzPi",      
     base_url="https://api.yixia.ai",      # 中转地址
 )
 
@@ -99,13 +106,38 @@ def chunk(text: str, size: int = 500, overlap: int = 50) -> list[str]:
         start += size - overlap              # 前进 size,但回退 overlap 做缓冲
     return chunks
 
+def load_doc(file: UploadFile = File(...)) -> str:
+    """
+    读取单个docx文件，提取所有文字
+    """
+    if not file.filename.endswith((".docx")):
+        raise HTTPException(400, "只支持 docx 文件")
+    
+    # 2. 保存临时文件
+    temp_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}_{file.filename}")
+    with open(temp_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    # 3. 提取文字
+    try:
+        if file.filename.endswith(".docx"):
+            doc = Document(temp_path)
+            text = "\n".join([para.text for para in doc.paragraphs])
+    except Exception as e:
+            raise HTTPException(400, f"无法读取文件:{str(e)}")
+    finally: 
+        os.remove(temp_path)  # 清理临时文件
+    
+    if not text.strip():
+        raise HTTPException(400, "docx内容为空")
+    return text
 
 @app.post("/api/rag/ingest")
 async def ingest(file: UploadFile = File(...)):
-    """上传一篇讲义(先支持 .txt):读文本 → 切块 → 存进向量库。"""
-    raw = await file.read()
-    text = raw.decode("utf-8", errors="ignore")   # 先按 txt 读;pdf 以后换这一行
+    """上传一篇讲义(支持pdf):读文本 → 切块 → 存进向量库。"""
+    text = load_doc(file)
     text = text.strip()
+    
     if not text:
         return {"error": "文档内容为空"}
 
@@ -146,7 +178,6 @@ async def ask(body: AskBody):
 用户问题:{body.question}
 
 请用中文简洁作答。"""
-
     # 4. 调 Claude 生成答案
     response = client.messages.create(
         model="claude-opus-4-7",
