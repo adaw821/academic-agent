@@ -1,7 +1,7 @@
 import base64
 import json
 import os
-import anthropic
+from openai import OpenAI
 import chromadb
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
@@ -9,7 +9,6 @@ from docx import Document
 from pydantic import BaseModel
 import uuid
 import shutil
-import textract
 
 app = FastAPI()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -21,9 +20,9 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 @app.get("/")          # 演示页:浏览器开 http://127.0.0.1:5000/ 就能看到
 def home():
     return FileResponse(os.path.join(BASE_DIR, "index.html"))
-client = anthropic.Anthropic(
-    api_key="sk-ICwd9A5ZvlLAiJ37CFgOFjNbOzqLIpEgLkM6sH2CREDIDzPi",      
-    base_url="https://api.yixia.ai",      # 中转地址
+client = OpenAI(
+    api_key="4dcb28b18ef64861a154b6350aa35637.ZRxnmCjMWnEEfXwo",
+    base_url="https://open.bigmodel.cn/api/paas/v4/",   # 智谱 GLM 官方地址(OpenAI 兼容)
 )
 
 # 向量库:持久化到磁盘 ./chroma_db,重启不丢
@@ -38,16 +37,14 @@ async def parse_schedule(file: UploadFile = File(...)):
     image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")  # 2. 转成 base64
     print(f"[DEBUG] 文件名={file.filename} content_type={file.content_type} 字节数={len(image_bytes)} b64长度={len(image_b64)}")
 
-    response = client.messages.create(                                # 3. 调 Claude 看图
-        model="claude-opus-4-7",
+    response = client.chat.completions.create(                        # 3. 调 GLM-4V 看图
+        model="glm-4v-flash",
         max_tokens=2000,
         messages=[{
             "role": "user",
             "content": [
-                {"type": "image",
-                 "source": {"type": "base64",
-                            "media_type": file.content_type,
-                            "data": image_b64}},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:{file.content_type};base64,{image_b64}"}},
                 {"type": "text", "text": """你是一个课程表解析助手。下面是一张课程表图片。
 请提取图片中所有课程,以 JSON 数组的形式返回。
 
@@ -73,7 +70,7 @@ async def parse_schedule(file: UploadFile = File(...)):
         }],
     )
 
-    text = response.content[0].text                # 拿到模型回复(不再用 prefill)
+    text = response.choices[0].message.content     # 拿到模型回复(OpenAI 格式)
     print(f"[DEBUG] 模型原文: {text[:200]}")        # 看看模型到底回了啥
 
     # 从文本里抠出 JSON 数组:容忍 ```包裹、前后废话
@@ -178,13 +175,13 @@ async def ask(body: AskBody):
 用户问题:{body.question}
 
 请用中文简洁作答。"""
-    # 4. 调 Claude 生成答案
-    response = client.messages.create(
-        model="claude-opus-4-7",
+    # 4. 调 GLM 生成答案
+    response = client.chat.completions.create(
+        model="glm-4-flash",
         max_tokens=1000,
         messages=[{"role": "user", "content": prompt}],
     )
-    answer = response.content[0].text
+    answer = response.choices[0].message.content
 
     # 5. 返回答案 + 命中的原始片段(溯源)
     return {"answer": answer, "sources": docs}

@@ -7,7 +7,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
-
+import org.springframework.web.bind.annotation.RequestParam;
 import java.util.List;
 
 
@@ -18,18 +18,18 @@ import java.util.List;
 
 public class ScheduleController {
 
-    // 构造器注入:Spring 把造好的 ScheduleService bean 递进来,不要自己 new
+    // 设定为final，这样创建一次即可
     private final ScheduleService scheduleService;
 
     public ScheduleController(ScheduleService scheduleService) {
         this.scheduleService = scheduleService;
-    }
+    } 
 
     //前端点击接口发送一张图片给后端
     //后端给llm解析后会返回json数据
     //然后前端把json包装成内置课表
     @PostMapping(value = "/send")
-    public Result<List<ScheduleItemEntity>> handleScheduleImage(MultipartFile file) {
+    public Result<List<ScheduleItemEntity>> handleScheduleImage(@RequestParam("file") MultipartFile file) {
         try {
             //处理文件为空的情况
             if(file == null || file.isEmpty()){
