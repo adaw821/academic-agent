@@ -38,6 +38,7 @@ agent/
 __pycache__/
 *.pyc
 *.pyo
+*.session.sql
 
 ### Chroma 向量库(本地数据,不提交) ###
 chroma_db/
