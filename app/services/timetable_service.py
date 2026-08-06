@@ -1,15 +1,25 @@
 import base64
 import json
+import os
 
 from langchain_openai import ChatOpenAI
 
+from sqlalchemy.orm import Session
+
+from app.models.courses import Course
+from app.models.course_timetable import CourseSchedule
+
+from sqlalchemy import select
+from langchain_core.messages import HumanMessage
+
 llm = ChatOpenAI(
-    model=,
-    base_url=,
-    api_key=
+    model="glm-4.6v",
+    base_url="https://open.bigmodel.cn/api/paas/v4/",
+    api_key=os.environ["ZHIPU_API_KEY"]
 )
 
 TEXT="""
+
 你是一个课程表图片解析助手。你需要从收到的课程表图片中提取全部课程信息。
 
 必须返回一个 JSON 数组，数组中的每个对象表示一次独立的上课安排，并且必须保留以下全部字段：
@@ -47,10 +57,97 @@ TEXT="""
 
 UNNECCESSARY_ATTRIBUTE = ["teachers", "units", "course_code"]
 
-async def timetable_service(content: bytes):
-    await content_parse(content)
+
+async def timetable_service(content: bytes, db: Session, content_type: str):
+    complete, timetables = await content_parse(content, content_type)
+    await timetable_database(timetables, db)
+    if complete:
+        return{
+            "message": "课表解析成功",
+            "timetables": timetables
+        }
+    else:
+        return("课表渲染失败，再上传一次图片")
     
-async def content_parse(content: bytes):
+
+async def timetable_database(timetables:list, db:Session):
+        try:
+            for timetable in timetables:
+                course_code = timetable.get("course_code")
+                if course_code:
+                    course = db.scalar(select(Course).where(Course.course_code == course_code))
+                    if course:
+                        schedule = CourseSchedule()
+                        schedule.course_id = course.id 
+                        schedule.day_of_week = timetable.get("day_of_week")              
+                        schedule.start_time = timetable.get("start_time")
+                        schedule.end_time = timetable.get("end_time")
+                        schedule.location = timetable.get("location")
+                        db.add(schedule)
+                    else:
+                        course_name = timetable.get("course_name")
+                        course = db.scalar(select(Course).where(Course.course_name==course_name))
+                        if not course:
+                            course = Course()
+                            schedule = CourseSchedule()
+                            course.course_name = course_name
+                            course.course_code = course_code
+                            course.teachers = timetable.get("teachers")
+                            course.units = timetable.get("units")
+                            db.add(course)
+                            db.flush()
+                            
+                            schedule.course_id = course.id
+                            schedule.day_of_week = timetable.get("day_of_week")              
+                            schedule.start_time = timetable.get("start_time")
+                            schedule.end_time = timetable.get("end_time")
+                            schedule.location = timetable.get("location")
+                            db.add(schedule)
+                        else:
+                            schedule = CourseSchedule()
+                            schedule.course_id = course.id 
+                            schedule.day_of_week = timetable.get("day_of_week")              
+                            schedule.start_time = timetable.get("start_time")
+                            schedule.end_time = timetable.get("end_time")
+                            schedule.location = timetable.get("location")
+                            db.add(schedule)
+                else:
+                        course_name = timetable.get("course_name")
+                        course = db.scalar(select(Course).where(Course.course_name==course_name))
+                        if not course:
+                            course = Course()
+                            schedule = CourseSchedule()
+                            course.course_name = course_name
+                            course.course_code = course_code
+                            course.teachers = timetable.get("teachers")
+                            course.units = timetable.get("units")
+                            db.add(course)
+                            db.flush()
+                            
+                            schedule.course_id = course.id
+                            schedule.day_of_week = timetable.get("day_of_week")              
+                            schedule.start_time = timetable.get("start_time")
+                            schedule.end_time = timetable.get("end_time")
+                            schedule.location = timetable.get("location")
+                            db.add(schedule)
+                        else:
+                            schedule = CourseSchedule()
+                            schedule.course_id = course.id 
+                            schedule.day_of_week = timetable.get("day_of_week")              
+                            schedule.start_time = timetable.get("start_time")
+                            schedule.end_time = timetable.get("end_time")
+                            schedule.location = timetable.get("location")
+                            db.add(schedule)            
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+    
+       
+       
+   
+    
+async def content_parse(content: bytes, content_type: str):
     try:
         if not content:
             raise ValueError("图片不能为空")
@@ -58,7 +155,25 @@ async def content_parse(content: bytes):
         img_base64 = base64.b64encode(content)
         processed_content = img_base64.decode("utf-8")
         
-        response = await llm.ainvoke(processed_content, TEXT)
+        message = HumanMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": TEXT
+                },
+                
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": (
+                            f"data:{content_type};"
+                            f"base64,{processed_content}"
+                        )
+                    },
+                }
+            ]
+        )
+        response = await llm.ainvoke([message])
         
         response_content = response.content
         if not response_content:
@@ -88,8 +203,7 @@ async def content_parse(content: bytes):
         
         if not valid_timetables:
             raise ValueError("所有课程都缺少必要字段")
-        
-        complete = False
-        if len(valid_timetables) == len(timetable):
-            complete=True
-        return complete, valid_timetables
+         
+        return len(valid_timetables) == len(timetables), valid_timetables
+    except Exception:
+        raise ValueError("解析图片失败")
