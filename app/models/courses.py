@@ -22,7 +22,7 @@ class Course(Base):
     )
 
     teachers: Mapped[str|None] = mapped_column(
-        String(20),
+        String(50),
         nullable=True
     )
 
