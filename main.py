@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.db.database import Base, engine
+from app.models.users import User
 from app.models.courses import Course
 from app.models.course_timetable import CourseSchedule
 
