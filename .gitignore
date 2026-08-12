@@ -35,6 +35,7 @@ build/
 ### Python 虚拟环境 / 缓存 ###
 agent/
 **/agent/
+.venv/
 __pycache__/
 *.pyc
 *.pyo

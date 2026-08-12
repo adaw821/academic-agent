@@ -10,6 +10,10 @@ from app.db.database import Base
 from app.models.users import User
 from app.models.courses import Course
 from app.models.course_timetable import CourseSchedule
+from app.models.projects import Project
+from app.models.documents import Document
+from app.models.document_parents import Parent
+from app.models.document_child import Child
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

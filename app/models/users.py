@@ -44,3 +44,7 @@ class User(Base):
         String(255),
         nullable=False
     )
+
+    projects: Mapped[list["Project"]]=relationship(
+        back_populates="user"
+    )
