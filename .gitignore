@@ -51,3 +51,6 @@ chroma_db/
 ### 上传的临时文件 ###
 uploads/
 **/uploads/
+
+# Local API test files
+test_files/
