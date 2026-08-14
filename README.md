@@ -1,0 +1,563 @@
+# Academic Agent 测试指南
+
+本文档用于帮助测试人员在本地启动项目，并测试文档上传、Docling 解析、父子分片和向量入库效果。
+
+## 1. 当前功能
+
+项目目前提供 3 个 HTTP 接口：
+
+| 方法 | 地址 | 用途 |
+| --- | --- | --- |
+| `POST` | `/api/timetable` | 上传课表图片并识别 |
+| `POST` | `/api/projects` | 创建文档项目 |
+| `POST` | `/api/projects/{project_id}/documents` | 上传文档、解析、分片并生成向量 |
+
+本文主要测试后两个接口。文档处理流程如下：
+
+```text
+TXT/PDF/DOCX/PPTX
+  -> Docling 解析为 Markdown
+  -> 父分片（2000 字符，重叠 80）
+  -> 子分片（150 字符，重叠 30）
+  -> BAAI/bge-m3 生成 1024 维向量
+  -> PostgreSQL + pgvector
+```
+
+## 2. 环境要求
+
+- Git
+- Python 3.11（推荐使用 64 位版本）
+- PostgreSQL 15 或更高版本
+- PostgreSQL 的 `pgvector` 扩展
+- ApiPost（用于调用接口，可选）
+- 可访问 Hugging Face 的网络环境
+
+首次处理文档时，`sentence-transformers` 会下载 `BAAI/bge-m3` 模型，Docling 也可能下载所需模型。第一次请求会比较慢，并需要数 GB 可用磁盘空间。后续请求会使用本地缓存。
+
+## 3. 下载代码
+
+```powershell
+git clone https://github.com/adaw821/academic-agent.git
+cd academic-agent
+git checkout new
+```
+
+确认当前分支：
+
+```powershell
+git branch --show-current
+```
+
+输出应为：
+
+```text
+new
+```
+
+## 4. 创建 Python 虚拟环境
+
+Windows PowerShell：
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+macOS/Linux：
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+安装的主要依赖包括 FastAPI、SQLAlchemy、Alembic、PostgreSQL 驱动、pgvector、Docling、Sentence Transformers 和 BGE-M3 运行依赖。
+
+性能埋点不需要安装额外依赖。埋点只使用 Python 标准库中的 `logging` 和 `time.perf_counter()`，执行原有的 `pip install -r requirements.txt` 即可。当前阶段也不需要安装 Ragas；等项目增加向量检索和问答流程后，再将 Ragas 作为评测依赖加入。
+
+## 5. 准备 PostgreSQL
+
+先创建一个测试数据库，例如：
+
+```sql
+CREATE DATABASE academic_agent;
+```
+
+连接到 `academic_agent` 数据库后启用向量扩展：
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+如果执行扩展命令时报错，需要先在 PostgreSQL 中安装 pgvector。注意：Python 包 `pgvector` 不能代替 PostgreSQL 服务端扩展。
+
+## 6. 设置环境变量
+
+请根据自己的用户名、密码、端口修改连接地址。
+
+Windows PowerShell：
+
+```powershell
+$env:DATABASE_URL="postgresql+psycopg://postgres:你的密码@127.0.0.1:5432/academic_agent"
+$env:ZHIPU_API_KEY="你的智谱API密钥"
+```
+
+macOS/Linux：
+
+```bash
+export DATABASE_URL="postgresql+psycopg://postgres:你的密码@127.0.0.1:5432/academic_agent"
+export ZHIPU_API_KEY="你的智谱API密钥"
+```
+
+`DATABASE_URL` 是启动项目的必需配置。`ZHIPU_API_KEY` 用于课表图片识别；当前应用在启动时也会读取它。如果只测试文档分片，可以暂时设置一个非空占位值，但不要调用 `/api/timetable`。
+
+不要把真实数据库密码或 API 密钥提交到 Git，也不要把它们放进要分享的 ApiPost 云端变量中。
+
+## 7. 初始化数据库
+
+在项目根目录执行：
+
+```powershell
+alembic upgrade head
+```
+
+然后用数据库客户端执行下面的 SQL，创建一个仅供本地测试使用的用户：
+
+```sql
+INSERT INTO users (username, email, phone, password_hash)
+VALUES ('chunk_tester', 'chunk_tester@example.com', NULL, 'test-only')
+RETURNING id;
+```
+
+记录返回的用户 `id`，后面创建项目时需要使用。该记录只用于本地分片测试，不要用于真实登录功能。
+
+## 8. 启动服务
+
+确保环境变量已经在当前终端中设置，然后运行：
+
+```powershell
+uvicorn main:app --reload
+```
+
+启动后访问：
+
+- Swagger 文档：<http://127.0.0.1:8000/docs>
+- ReDoc：<http://127.0.0.1:8000/redoc>
+- OpenAPI 文件：<http://127.0.0.1:8000/openapi.json>
+
+如果能够打开 `/docs`，说明服务已正常启动。
+
+## 9. 导入 ApiPost
+
+浏览器打开：
+
+```text
+http://127.0.0.1:8000/openapi.json
+```
+
+将内容保存为 `openapi.json`，然后在 ApiPost 中选择：
+
+```text
+导入项目 -> 手动导入 -> Swagger 3.0 -> 选择 openapi.json
+```
+
+也可以直接在 Swagger 页面测试，不强制使用 ApiPost。
+
+## 10. 准备测试文件
+
+建议在本地创建 `test_files` 目录。该目录已被 Git 忽略，不会上传到仓库。
+
+至少准备以下文件：
+
+1. 一份纯文本 `.txt`，包含多个标题和长段落；
+2. 一份普通文字型 `.pdf`；
+3. 一份含标题、列表和表格的 `.docx`；
+4. 一份多页、含项目符号和表格的 `.pptx`；
+5. 一份包含中英文混排、数字和专有名词的文档；
+6. 一份空文件或不支持的文件，用于异常测试。
+
+请不要只用扫描版 PDF。当前流程主要测试可解析文字；扫描件还会引入 OCR 质量变量。如果要测试扫描件，应单独记录为 OCR 测试。
+
+为了判断是否丢失内容，建议在正常测试文档的开头、中间和末尾分别放置唯一标记：
+
+```text
+START-MARKER-2026
+MIDDLE-MARKER-2026
+END-MARKER-2026
+```
+
+## 11. ApiPost 测试步骤
+
+### 11.1 创建项目
+
+请求：
+
+```text
+POST http://127.0.0.1:8000/api/projects
+```
+
+Body 选择 `JSON`：
+
+```json
+{
+  "user_id": 1,
+  "name": "分片效果测试"
+}
+```
+
+将 `user_id` 替换为初始化数据库时返回的 ID。请求成功后记录响应中的 `project_id`。
+
+预期结果：HTTP 状态码为 `201`，并返回 `project_id`。
+
+### 11.2 上传并分片文档
+
+请求：
+
+```text
+POST http://127.0.0.1:8000/api/projects/{project_id}/documents
+```
+
+将 `{project_id}` 替换为上一步返回的数字。Body 选择 `form-data`：
+
+| 参数名 | 类型 | 值 |
+| --- | --- | --- |
+| `files` | File | 选择一个或多个测试文件 |
+
+支持的扩展名：
+
+```text
+.txt  .pdf  .docx  .pptx
+```
+
+不要手动设置 `Content-Type` 请求头，ApiPost 会自动生成带 boundary 的 `multipart/form-data`。
+
+预期结果：HTTP 状态码为 `200`，`saved_files` 中出现成功保存的文件，`failed_files` 中只出现空文件或不支持的文件。
+
+第一次上传可能因为模型下载和初始化而耗时较长。测试时请记录：
+
+- 文件名和文件大小；
+- 请求总耗时；
+- HTTP 状态码；
+- `saved_files` 和 `failed_files`；
+- 服务端终端中的异常信息。
+
+### 11.3 查看和保存性能日志
+
+埋点日志默认输出到运行 Uvicorn 的终端。正式测速时不要使用 `--reload`，避免文件监控和自动重启影响结果。
+
+Windows PowerShell：
+
+```powershell
+New-Item -ItemType Directory -Force test_files\logs
+uvicorn main:app --host 127.0.0.1 --port 8000 2>&1 | Tee-Object -FilePath test_files\logs\performance.log
+```
+
+macOS/Linux：
+
+```bash
+mkdir -p test_files/logs
+uvicorn main:app --host 127.0.0.1 --port 8000 2>&1 | tee test_files/logs/performance.log
+```
+
+日志保存在已被 Git 忽略的 `test_files/logs` 中，不应提交原始测试文档或日志。
+
+一次成功上传会产生以下几类关键事件：
+
+```text
+event=document_converter_initialized elapsed_ms=...
+event=embedding_model_loaded model=BAAI/bge-m3 elapsed_ms=...
+event=document_chunked document_id=... file_size_bytes=...
+    parse_ms=... parent_split_ms=... child_split_ms=...
+    embedding_ms=... parent_db_flush_ms=... total_ms=...
+    parent_count=... child_count=...
+event=document_upload_completed project_id=... total_ms=...
+    file_save_ms=... commit_ms=... saved_count=... failed_count=...
+```
+
+失败时会出现：
+
+```text
+event=document_upload_failed project_id=... total_ms=...
+    saved_count=... failed_count=...
+```
+
+该日志之后会跟随 Python 异常堆栈，请将堆栈一并保存。日志不会主动记录文档正文、向量、数据库密码或 API 密钥。
+
+### 11.4 日志字段含义
+
+| 字段 | 含义 | 重点观察 |
+| --- | --- | --- |
+| `document_converter_initialized` | Docling 转换器首次初始化 | 只在当前进程第一次使用时出现 |
+| `embedding_model_loaded` | BGE-M3 首次加载 | 只在当前进程第一次使用时出现，通常耗时较长 |
+| `parse_ms` | Docling 转换并导出 Markdown 的耗时 | PDF、DOCX、PPTX 的主要解析指标 |
+| `parent_split_ms` | 创建父分片的纯文本切分耗时 | 通常应远小于解析和向量化 |
+| `child_split_ms` | 创建全部子分片的纯文本切分耗时 | 与父分片数量和文本长度相关 |
+| `embedding_ms` | 所有子分片逐个生成向量的累计耗时 | 当前最可能的性能瓶颈 |
+| `parent_db_flush_ms` | 创建父记录并取得主键的累计耗时 | 可发现数据库连接或写入变慢 |
+| `document_chunked.total_ms` | 单个文件从转换到创建分片对象的总耗时 | 不包含最终事务提交 |
+| `file_save_ms` | 将本次请求中的文件写入磁盘的累计耗时 | 判断磁盘写入是否异常 |
+| `commit_ms` | 整个上传请求最终提交数据库事务的耗时 | 包含待提交子分片和向量的写入成本 |
+| `document_upload_completed.total_ms` | 整个上传接口总耗时 | 可与 ApiPost 显示的请求耗时对照 |
+| `parent_count` / `child_count` | 实际创建的父、子分片数 | 用于计算吞吐量和排查分片异常 |
+| `saved_count` / `failed_count` | 本次请求成功和被拒绝的文件数 | 应与接口响应一致 |
+
+注意：`document_chunked.total_ms` 可能略大于各子阶段之和，因为它还包含对象创建、循环和其他少量开销。首次 `converter.convert()` 也可能触发 Docling 的延迟初始化，因此第一次的 `parse_ms` 通常不能代表稳定速度。
+
+### 11.5 性能测试方法
+
+需要区分三种情况，不能混在一起计算平均值：
+
+1. **首次安装冷启动**：本机还没有相关模型缓存，包含模型下载时间，只记录一次；
+2. **进程冷启动**：模型已经下载到磁盘，但 Uvicorn 刚启动，记录第一次上传；
+3. **热启动**：不重启 Uvicorn，继续上传相同规模文件，代表日常处理速度。
+
+推荐步骤：
+
+1. 启动服务，上传一个小文件完成预热；
+2. 保持服务运行，对每个正式测试文件连续测试 3 次；
+3. 每次使用新的测试项目或明确记录新的 `document_id`，避免混淆数据库结果；
+4. 记录 3 次热启动耗时，并计算平均值、最快值和最慢值；
+5. 重启 Uvicorn，再测试一次进程冷启动；
+6. 使用 ApiPost 总耗时减去服务端 `total_ms`，观察客户端和传输额外开销；
+7. 测试期间不要同时运行大型下载、模型训练或其他高负载程序。
+
+建议测试矩阵：
+
+| 文件类型 | 小文件 | 中文件 | 大文件 |
+| --- | --- | --- | --- |
+| TXT | 约 10 KB | 约 500 KB | 约 5 MB |
+| PDF | 约 5 页 | 约 50 页 | 约 200 页 |
+| DOCX | 约 5 页 | 约 50 页 | 约 200 页 |
+| PPTX | 约 10 页 | 约 50 页 | 约 150 页 |
+
+“大文件”只在测试机器资源允许时执行。如果单次请求超过 ApiPost、反向代理或服务端超时时间，应记录实际超时位置，不要反复无限等待。
+
+可以根据日志计算两个辅助指标：
+
+```text
+向量化吞吐量 = child_count / (embedding_ms / 1000)
+整体分片吞吐量 = child_count / (document_chunked.total_ms / 1000)
+```
+
+单位均为“子分片/秒”。不同电脑的绝对速度不可直接横向比较，应在同一台电脑、同一模型缓存状态和同一份测试文件上比较代码版本。
+
+### 11.6 资源、并发和稳定性测试
+
+无需安装监控软件，先使用 Windows 任务管理器、macOS 活动监视器或 Linux 系统监控工具观察：
+
+- Python 进程 CPU 使用率；
+- 内存峰值；
+- 如果使用 GPU，记录显存峰值和 GPU 利用率；
+- 上传文件所在磁盘的读写占用；
+- PostgreSQL 进程的 CPU 和内存变化。
+
+资源数据至少在“小文件热启动”和“大文件处理”时各记录一次。
+
+并发测试只需做基础验证：
+
+1. 保持同一个 Uvicorn 进程运行；
+2. 从两个 ApiPost 标签页尽量同时上传两个中文件；
+3. 再尝试同时上传三个中文件；
+4. 记录每个请求的耗时、是否成功、CPU/内存峰值和终端异常；
+5. 查询数据库，确认没有缺失、重复或只写入一半的文档记录。
+
+当前解析和向量化包含同步 CPU 密集型工作，并发性能可能较弱。本轮只建立基线和发现崩溃、超时、内存不足问题，不要求立即进行高并发压测。
+
+### 11.7 本轮必须提交的测试结果
+
+测试人员最终应提供：
+
+- `git rev-parse --short HEAD` 的输出；
+- 测试电脑的操作系统、CPU、内存以及是否使用 GPU；
+- Python、PostgreSQL 版本；
+- 每个测试文件的类型、大小、页数或大致字数；
+- 首次安装冷启动、进程冷启动和热启动耗时；
+- 上述全部埋点字段；
+- CPU、内存和显存峰值；
+- 父子分片数量及长度统计 SQL 结果；
+- 唯一标记完整性检查结果；
+- 人工分片质量评分；
+- 异常测试和并发测试结果；
+- 失败请求对应的完整日志堆栈；
+- 最终结论：通过、有条件通过或不通过。
+
+## 12. 检查分片结果
+
+### 12.1 统计每份文档的分片数量和长度
+
+```sql
+SELECT
+    d.id AS document_id,
+    d.filename,
+    COUNT(DISTINCT p.id) AS parent_count,
+    COUNT(c.id) AS child_count,
+    MIN(LENGTH(c.content)) AS min_child_length,
+    MAX(LENGTH(c.content)) AS max_child_length,
+    ROUND(AVG(LENGTH(c.content)), 2) AS avg_child_length
+FROM documents d
+LEFT JOIN document_parent p ON p.document_id = d.id
+LEFT JOIN document_child c ON c.parent_id = p.id
+GROUP BY d.id, d.filename
+ORDER BY d.id;
+```
+
+### 12.2 按顺序查看父分片
+
+```sql
+SELECT id, chunk_index, LENGTH(content) AS content_length, content
+FROM document_parent
+WHERE document_id = 你的文档ID
+ORDER BY chunk_index;
+```
+
+### 12.3 按顺序查看子分片
+
+```sql
+SELECT
+    p.chunk_index AS parent_index,
+    c.chunk_index AS child_index,
+    LENGTH(c.content) AS content_length,
+    c.content
+FROM document_parent p
+JOIN document_child c ON c.parent_id = p.id
+WHERE p.document_id = 你的文档ID
+ORDER BY p.chunk_index, c.chunk_index;
+```
+
+### 12.4 检查唯一标记是否全部保留
+
+```sql
+SELECT
+    d.filename,
+    BOOL_OR(p.content LIKE '%START-MARKER-2026%') AS has_start,
+    BOOL_OR(p.content LIKE '%MIDDLE-MARKER-2026%') AS has_middle,
+    BOOL_OR(p.content LIKE '%END-MARKER-2026%') AS has_end
+FROM documents d
+JOIN document_parent p ON p.document_id = d.id
+GROUP BY d.id, d.filename;
+```
+
+三个字段都应为 `true`。
+
+### 12.5 检查空分片和向量
+
+```sql
+SELECT COUNT(*) AS bad_child_count
+FROM document_child
+WHERE BTRIM(content) = '' OR embedding IS NULL;
+```
+
+预期结果为 `0`。数据库字段类型已经限制向量维度为 1024；如果模型返回错误维度，入库会失败。
+
+## 13. 人工评价标准
+
+逐份查看父、子分片，并按下面的项目打分。每项 1～5 分，5 分最好。
+
+| 项目 | 检查内容 |
+| --- | --- |
+| 解析完整性 | 开头、中间、末尾的内容是否都保留，是否存在整段缺失 |
+| 语义完整性 | 标题是否和正文相连，完整句子是否被严重切断 |
+| 表格质量 | 表头、行列和值是否仍能看懂 |
+| 分片粒度 | 是否出现大量过短碎片，单个分片是否包含过多无关内容 |
+| 顺序正确性 | PDF 页、PPT 页和段落顺序是否正确 |
+| 特殊内容 | 中英文、数字、公式、项目符号和专有名词是否保留 |
+
+重点记录以下问题：
+
+- 标题与其正文被拆开；
+- 句子在分片边界处失去关键主语或条件；
+- 表格被打散后无法理解；
+- 页眉、页脚重复进入大量分片；
+- 出现乱码、空白块或只有几个字的碎片；
+- 文档内容顺序错乱；
+- 原文存在但数据库中完全找不到。
+
+## 14. 异常测试
+
+至少执行以下场景：
+
+| 场景 | 预期结果 |
+| --- | --- |
+| 不存在的 `project_id` | 返回 `404` |
+| 空文件 | 文件进入 `failed_files` |
+| 上传 `.jpg`、`.zip` 等不支持文件 | 文件进入 `failed_files` |
+| 同时上传多个合法文件 | 每个文件都出现在 `saved_files` |
+| 文档无法被 Docling 解析 | 请求失败，数据库事务回滚 |
+| 同一文件上传两次 | 当前实现会创建两份文档记录，应记录为现有行为 |
+
+## 15. 测试报告模板
+
+将下面内容复制一份，为每个文件填写：
+
+```text
+测试日期：
+测试人员：
+Git 分支：new
+Git 提交号：
+操作系统：
+CPU：
+内存：
+GPU及显存（没有则填无）：
+Python 版本：
+PostgreSQL 版本：
+
+文件名：
+文件类型：
+文件大小：
+总页数/大致字数：
+上传耗时：
+测试类型：首次安装冷启动 / 进程冷启动 / 热启动
+document_converter_initialized elapsed_ms：
+embedding_model_loaded elapsed_ms：
+parse_ms：
+parent_split_ms：
+child_split_ms：
+embedding_ms：
+parent_db_flush_ms：
+document_chunked total_ms：
+file_save_ms：
+commit_ms：
+document_upload_completed total_ms：
+向量化吞吐量（子分片/秒）：
+CPU峰值：
+内存峰值：
+GPU及显存峰值：
+父分片数量：
+子分片数量：
+子分片最短/最长/平均长度：
+
+解析完整性（1-5）：
+语义完整性（1-5）：
+表格质量（1-5）：
+分片粒度（1-5）：
+顺序正确性（1-5）：
+特殊内容（1-5）：
+
+发现的问题：
+问题所在页码或原文位置：
+对应 parent_index / child_index：
+服务端错误日志：
+并发测试结果：
+异常测试结果：
+总体评价：通过 / 有条件通过 / 不通过
+```
+
+获取当前提交号：
+
+```powershell
+git rev-parse --short HEAD
+```
+
+## 16. 当前限制
+
+- 当前只有上传、解析和向量入库流程，还没有提供向量检索 API；因此本轮主要评价解析及分片质量。
+- `chunk_size` 和 `chunk_overlap` 由 LangChain 文本分割器按字符计算，不是按模型 token 计算。
+- 文档状态当前保存为 `uploaded`，处理结束后不会自动更新为 `processed`。
+- 文档上传处理是同步等待的，大文件可能使请求耗时较长。
+- 当前没有文档删除接口；重复测试会持续增加数据库记录和本地上传文件。
+- 当前没有自动清理测试数据的功能，请为测试使用独立数据库。
+
+如果后续增加检索接口，应再补充 `Recall@1`、`Recall@3`、`Recall@5` 和 MRR 等检索指标测试。

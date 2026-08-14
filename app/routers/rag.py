@@ -1,5 +1,7 @@
 from pathlib import Path
 from uuid import uuid4
+import logging
+from time import perf_counter
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -12,6 +14,7 @@ from app.schemas.project_create import ProjectCreate
 from app.models.users import User
 
 
+logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
 FILE_TYPES = {
     ".txt": "text/plain",
@@ -36,6 +39,7 @@ async def upload_files(
     db: Session = Depends(get_db),
 ):
     """文件上传切片接口"""
+    request_started_at = perf_counter()
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
@@ -46,6 +50,7 @@ async def upload_files(
     saved_files = []
     failed_files = []
     created_paths: list[Path] = []
+    file_save_ms = 0.0
 
     try:
         for file in files:
@@ -63,7 +68,9 @@ async def upload_files(
 
             stored_filename = f"{uuid4().hex}{suffix}"
             storage_path = project_directory / stored_filename
+            file_save_started_at = perf_counter()
             storage_path.write_bytes(content)
+            file_save_ms += (perf_counter() - file_save_started_at) * 1000
             created_paths.append(storage_path)
 
             content_type = FILE_TYPES[suffix]
@@ -95,15 +102,36 @@ async def upload_files(
                 }
             )
 
+        commit_started_at = perf_counter()
         db.commit()
+        commit_ms = (perf_counter() - commit_started_at) * 1000
     except Exception:
         db.rollback()
         for path in created_paths:
             path.unlink(missing_ok=True)
+        logger.exception(
+            "event=document_upload_failed project_id=%s total_ms=%.2f "
+            "saved_count=%s failed_count=%s",
+            project_id,
+            (perf_counter() - request_started_at) * 1000,
+            len(saved_files),
+            len(failed_files),
+        )
         raise HTTPException(status_code=500, detail="文件保存失败")
     finally:
         for file in files:
             await file.close()
+
+    logger.info(
+        "event=document_upload_completed project_id=%s total_ms=%.2f "
+        "file_save_ms=%.2f commit_ms=%.2f saved_count=%s failed_count=%s",
+        project_id,
+        (perf_counter() - request_started_at) * 1000,
+        file_save_ms,
+        commit_ms,
+        len(saved_files),
+        len(failed_files),
+    )
 
     return {
         "message": "文件上传完成",
