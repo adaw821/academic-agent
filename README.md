@@ -2,23 +2,26 @@
 
 本文档用于帮助测试人员在本地启动项目，并测试文档上传、Docling 解析、父子分片和向量入库效果。
 
+首次搭建请先阅读 [本地环境安装与启动](ENVIRONMENT.md)，包含 Python、PostgreSQL、pgvector、迁移和独立 Ragas 环境。问答测试按 [问答功能测试指南](问答功能测试指南.md) 执行。
+
 ## 1. 当前功能
 
-项目目前提供 3 个 HTTP 接口：
+项目目前提供 5 个 HTTP 接口：
 
 | 方法 | 地址 | 用途 |
 | --- | --- | --- |
 | `POST` | `/api/timetable` | 上传课表图片并识别 |
 | `POST` | `/api/projects` | 创建文档项目 |
 | `POST` | `/api/projects/{project_id}/documents` | 上传文档、解析、分片并生成向量 |
+| `GET` | `/api/projects/{project_id}/documents/{document_id}` | 查询后台处理状态 |
+| `POST` | `/api/projects/{project_id}/ask` | 检索并回答，返回答案、召回正文和来源 |
 
 本文主要测试后两个接口。文档处理流程如下：
 
 ```text
-TXT/PDF/DOCX/PPTX
-  -> Docling 解析为 Markdown
+TXT 直接按 UTF-8 读取；PDF/DOCX/PPTX 经 Docling 解析为 Markdown
   -> 父分片（2000 字符，重叠 80）
-  -> 子分片（150 字符，重叠 30）
+  -> 子分片（TXT：450 字符，重叠 50；其他：150 字符，重叠 30）
   -> BAAI/bge-m3 生成 1024 维向量
   -> PostgreSQL + pgvector
 ```
@@ -26,8 +29,8 @@ TXT/PDF/DOCX/PPTX
 ## 2. 环境要求
 
 - Git
-- Python 3.11（推荐使用 64 位版本）
-- PostgreSQL 15 或更高版本
+- 64 位 Python（当前开发环境为 3.13.5）
+- PostgreSQL（环境指南以 16 为例）
 - PostgreSQL 的 `pgvector` 扩展
 - ApiPost（用于调用接口，可选）
 - 可访问 Hugging Face 的网络环境
@@ -39,7 +42,7 @@ TXT/PDF/DOCX/PPTX
 ```powershell
 git clone https://github.com/adaw821/academic-agent.git
 cd academic-agent
-git checkout new
+git checkout <开发者提供的分支名>
 ```
 
 确认当前分支：
@@ -48,18 +51,14 @@ git checkout new
 git branch --show-current
 ```
 
-输出应为：
-
-```text
-new
-```
+输出应与开发者提供的待测分支一致；另用 `git rev-parse --short HEAD` 核对提交编号。上面命令中的占位符需要替换后再执行。
 
 ## 4. 创建 Python 虚拟环境
 
 Windows PowerShell：
 
 ```powershell
-py -3.11 -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
@@ -68,7 +67,7 @@ pip install -r requirements.txt
 macOS/Linux：
 
 ```bash
-python3.11 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
@@ -76,7 +75,7 @@ pip install -r requirements.txt
 
 安装的主要依赖包括 FastAPI、SQLAlchemy、Alembic、PostgreSQL 驱动、pgvector、Docling、Sentence Transformers 和 BGE-M3 运行依赖。
 
-性能埋点不需要安装额外依赖。埋点只使用 Python 标准库中的 `logging` 和 `time.perf_counter()`，执行原有的 `pip install -r requirements.txt` 即可。当前阶段也不需要安装 Ragas；等项目增加向量检索和问答流程后，再将 Ragas 作为评测依赖加入。
+性能埋点只使用 Python 标准库中的 `logging` 和 `time.perf_counter()`，无需额外依赖。问答已实现；Ragas 属于独立评测环境，按 [环境指南](ENVIRONMENT.md) 安装，不混入后端运行依赖。
 
 ## 5. 准备 PostgreSQL
 
@@ -112,7 +111,7 @@ export DATABASE_URL="postgresql+psycopg://postgres:你的密码@127.0.0.1:5432/a
 export ZHIPU_API_KEY="你的智谱API密钥"
 ```
 
-`DATABASE_URL` 是启动项目的必需配置。`ZHIPU_API_KEY` 用于课表图片识别；当前应用在启动时也会读取它。如果只测试文档分片，可以暂时设置一个非空占位值，但不要调用 `/api/timetable`。
+`DATABASE_URL` 和 `ZHIPU_API_KEY` 都会在启动时读取。后者用于问答和课表识别；测试这两个功能必须使用有效密钥。当前不会自动读取 `.env` 文件。
 
 不要把真实数据库密码或 API 密钥提交到 Git，也不要把它们放进要分享的 ApiPost 云端变量中。
 
@@ -234,9 +233,9 @@ POST http://127.0.0.1:8000/api/projects/{project_id}/documents
 
 不要手动设置 `Content-Type` 请求头，ApiPost 会自动生成带 boundary 的 `multipart/form-data`。
 
-预期结果：HTTP 状态码为 `200`，`saved_files` 中出现成功保存的文件，`failed_files` 中只出现空文件或不支持的文件。
+预期结果：HTTP 状态码为 `202`，`saved_files` 中出现成功保存并排队的文件，`failed_files` 中出现空文件或不支持的文件。随后调用文档状态接口，等 `status=completed` 才能检查分片和正式提问。
 
-第一次上传可能因为模型下载和初始化而耗时较长。测试时请记录：
+首次后台处理可能因为模型下载和初始化而耗时较长。上传响应耗时与后台处理完成耗时应分开记录：
 
 - 文件名和文件大小；
 - 请求总耗时；
@@ -295,16 +294,16 @@ event=document_upload_failed project_id=... total_ms=...
 | `parse_ms` | Docling 转换并导出 Markdown 的耗时 | PDF、DOCX、PPTX 的主要解析指标 |
 | `parent_split_ms` | 创建父分片的纯文本切分耗时 | 通常应远小于解析和向量化 |
 | `child_split_ms` | 创建全部子分片的纯文本切分耗时 | 与父分片数量和文本长度相关 |
-| `embedding_ms` | 所有子分片逐个生成向量的累计耗时 | 当前最可能的性能瓶颈 |
+| `embedding_ms` | 按父片批量生成子片向量的累计耗时 | 当前最可能的性能瓶颈 |
 | `parent_db_flush_ms` | 创建父记录并取得主键的累计耗时 | 可发现数据库连接或写入变慢 |
 | `document_chunked.total_ms` | 单个文件从转换到创建分片对象的总耗时 | 不包含最终事务提交 |
 | `file_save_ms` | 将本次请求中的文件写入磁盘的累计耗时 | 判断磁盘写入是否异常 |
-| `commit_ms` | 整个上传请求最终提交数据库事务的耗时 | 包含待提交子分片和向量的写入成本 |
-| `document_upload_completed.total_ms` | 整个上传接口总耗时 | 可与 ApiPost 显示的请求耗时对照 |
+| `commit_ms` | 上传请求提交文档记录的耗时 | 不包含后台分片和向量的事务提交 |
+| `document_upload_completed.total_ms` | 上传保存并排队的总耗时 | 可与 ApiPost 响应耗时对照，不代表后台完成 |
 | `parent_count` / `child_count` | 实际创建的父、子分片数 | 用于计算吞吐量和排查分片异常 |
 | `saved_count` / `failed_count` | 本次请求成功和被拒绝的文件数 | 应与接口响应一致 |
 
-注意：`document_chunked.total_ms` 可能略大于各子阶段之和，因为它还包含对象创建、循环和其他少量开销。首次 `converter.convert()` 也可能触发 Docling 的延迟初始化，因此第一次的 `parse_ms` 通常不能代表稳定速度。
+注意：`document_chunked.total_ms` 不包含后台最终事务提交，也不包含排队时间；当前后台提交耗时没有单独记录。首次 Docling 转换也可能触发延迟初始化，因此第一次 `parse_ms` 通常不能代表稳定速度。后台失败看 `document_processing_failed` 日志和文档状态，HTTP 202 本身不代表解析成功。
 
 ### 11.5 性能测试方法
 
@@ -364,7 +363,7 @@ event=document_upload_failed project_id=... total_ms=...
 4. 记录每个请求的耗时、是否成功、CPU/内存峰值和终端异常；
 5. 查询数据库，确认没有缺失、重复或只写入一半的文档记录。
 
-当前解析和向量化包含同步 CPU 密集型工作，并发性能可能较弱。本轮只建立基线和发现崩溃、超时、内存不足问题，不要求立即进行高并发压测。
+后台解析和向量化在线程池中执行，仍有较高计算和内存开销。同一次上传登记的后台任务按序执行；跨请求可能并发。本轮只建立基线，不要求高并发压测。每轮预热、重复和并发测试都要查询状态并等待后台完成，不能仅以收到 202 为完成依据。
 
 ### 11.7 本轮必须提交的测试结果
 
@@ -485,7 +484,7 @@ WHERE BTRIM(content) = '' OR embedding IS NULL;
 | 空文件 | 文件进入 `failed_files` |
 | 上传 `.jpg`、`.zip` 等不支持文件 | 文件进入 `failed_files` |
 | 同时上传多个合法文件 | 每个文件都出现在 `saved_files` |
-| 文档无法被 Docling 解析 | 请求失败，数据库事务回滚 |
+| 文档无法被 Docling 解析 | 上传可能已返回 202；后台分片事务回滚，文档标记 failed，原文件保留 |
 | 同一文件上传两次 | 当前实现会创建两份文档记录，应记录为现有行为 |
 
 ## 15. 测试报告模板
@@ -495,7 +494,7 @@ WHERE BTRIM(content) = '' OR embedding IS NULL;
 ```text
 测试日期：
 测试人员：
-Git 分支：new
+Git 分支：填写实际分支
 Git 提交号：
 操作系统：
 CPU：
@@ -553,11 +552,11 @@ git rev-parse --short HEAD
 
 ## 16. 当前限制
 
-- 当前只有上传、解析和向量入库流程，还没有提供向量检索 API；因此本轮主要评价解析及分片质量。
+- 已实现单轮问答，返回 `answer`、`retrieved_contexts` 和 `sources`；尚未实现多轮对话及 Ragas 评测脚本。
 - `chunk_size` 和 `chunk_overlap` 由 LangChain 文本分割器按字符计算，不是按模型 token 计算。
-- 文档状态当前保存为 `uploaded`，处理结束后不会自动更新为 `processed`。
-- 文档上传处理是同步等待的，大文件可能使请求耗时较长。
+- 文档状态为 `queued` → `processing` → `completed`，后台异常时为 `failed`。
+- 上传保存后返回 202，后台任务不是持久化任务队列；服务重启可能中断处理，不会自动恢复。
 - 当前没有文档删除接口；重复测试会持续增加数据库记录和本地上传文件。
 - 当前没有自动清理测试数据的功能，请为测试使用独立数据库。
 
-如果后续增加检索接口，应再补充 `Recall@1`、`Recall@3`、`Recall@5` 和 MRR 等检索指标测试。
+问答人工测试与后续评测见 [问答功能测试指南](问答功能测试指南.md)。

@@ -33,7 +33,7 @@ class Course(Base):
     )
 
     teachers: Mapped[str|None] = mapped_column(
-        String(50),
+        String(100),
         nullable=True
     )
 

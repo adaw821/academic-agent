@@ -3,16 +3,18 @@ from uuid import uuid4
 import logging
 from time import perf_counter
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.services.chunk import chunking
-from app.db.database import get_db
+from app.db.database import get_db, SessionLocal
 from app.models.documents import Document
 from app.models.projects import Project
 from app.schemas.project_create import ProjectCreate
 from app.models.users import User
-
+from app.schemas.search import SearchRequest
+from app.services.search_services import search_children
+from app.services.answer_services import generate_answer
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
@@ -31,34 +33,77 @@ FILE_TYPES = {
 
 UPLOAD_ROOT = Path("data/uploads")
 
+# 普通 def 后台任务由框架放到线程池执行，使用独立数据库会话
+def process_document(document_id: int):
+    with SessionLocal() as db:
+        try:
+            document = db.get(Document, document_id)
+            if document is None:
+                raise ValueError(f"无效文档查询id: {document_id}")
+            document.status = "processing"
+            db.commit()
 
-@router.post("/projects/{project_id}/documents")
+            content = Path(document.storage_path).read_bytes()
+            chunking(
+                content=content,
+                db=db,
+                document_id=document_id,
+                file_name=document.filename,
+            )
+
+            # 分片和完成状态一起提交
+            document.status = "completed"
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("event=document_processing_failed document_id=%s", document_id)
+            # 保留原文件；回滚不完整的分片后，单独记录失败状态
+            try:
+                document = db.get(Document, document_id)
+                if document is not None:
+                    document.status = "failed"
+                    db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("event=document_status_update_failed document_id=%s", document_id)
+
+
+@router.post("/projects/{project_id}/documents", status_code=202)
 async def upload_files(
     project_id: int,
     files: list[UploadFile],
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """文件上传切片接口"""
+    """保存上传文件，返回后在后台切片入库。"""
+    #计时起点
     request_started_at = perf_counter()
+
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
 
+    #给当前项目准备一个存放文件的文件夹
     project_directory = UPLOAD_ROOT / f"project_{project_id}"
     project_directory.mkdir(parents=True, exist_ok=True)
 
     saved_files = []
     failed_files = []
+
+    #定义一个空列表，记录本次上传的文件路径，失败会删除
     created_paths: list[Path] = []
+
     file_save_ms = 0.0
 
     try:
+        """处理一次性上传大量文件的情况，然后交给chunk分片"""
         for file in files:
             original_filename = Path(file.filename or "").name.strip()
             suffix = Path(original_filename).suffix.lower()
 
+            #假如后缀不在需要类型就报错
             if not original_filename or suffix not in FILE_TYPES:
-                failed_files.append(original_filename or "未命名文件")
+                failed_files.append(original_filename)
                 continue
 
             content = await file.read()
@@ -66,11 +111,15 @@ async def upload_files(
                 failed_files.append(original_filename)
                 continue
 
+            #生成一个随机文件名，并保留原来的扩展名
             stored_filename = f"{uuid4().hex}{suffix}"
             storage_path = project_directory / stored_filename
+
+            #文件保存时间测速
             file_save_started_at = perf_counter()
             storage_path.write_bytes(content)
             file_save_ms += (perf_counter() - file_save_started_at) * 1000
+
             created_paths.append(storage_path)
 
             content_type = FILE_TYPES[suffix]
@@ -80,20 +129,11 @@ async def upload_files(
                 filename=original_filename,
                 content_type=content_type,
                 storage_path=storage_path.as_posix(),
-                status="uploaded",
+                #状态默认为queued（文件进入上传队列)配合后台改动
+                status="queued",
             )
             db.add(document_record)
             db.flush()
-            document_id = document_record.id
-            #进入service
-            await chunking(
-                content=content,
-                db=db,
-                document_id=document_id,
-                file_name=original_filename,
-            )
-
-
             saved_files.append(
                 {
                     "id": document_record.id,
@@ -105,6 +145,7 @@ async def upload_files(
         commit_started_at = perf_counter()
         db.commit()
         commit_ms = (perf_counter() - commit_started_at) * 1000
+
     except Exception:
         db.rollback()
         for path in created_paths:
@@ -133,10 +174,30 @@ async def upload_files(
         len(failed_files),
     )
 
+    # 文档记录提交成功后再登记任务，不传递本次请求的 db 或 UploadFile
+    for item in saved_files:
+        background_tasks.add_task(process_document, document_id=item["id"])
+
     return {
-        "message": "文件上传完成",
+        "message": "上传检查完成，已保存文件等待后台处理",
         "saved_files": saved_files,
         "failed_files": failed_files,
+    }
+
+
+@router.get("/projects/{project_id}/documents/{document_id}")
+def get_document_status(
+    project_id: int,
+    document_id: int,
+    db: Session = Depends(get_db),
+):
+    document = db.get(Document, document_id)
+    if document is None or document.project_id != project_id:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    return {
+        "id": document.id,
+        "filename": document.filename,
+        "status": document.status,
     }
 
 
@@ -164,3 +225,18 @@ async def project_creator(
         "message": "项目创建成功",
         "project_id": new_project.id,
     }
+
+@router.post("/projects/{project_id}/ask")
+def user_asking(
+    project_id: int,
+    request: SearchRequest,
+    db: Session = Depends(get_db),
+):
+    """问答检索接口"""
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="所选项目不存在")
+    results=[]
+    results = search_children(request.query, project_id, db, request.top_k)
+
+    return generate_answer(request.query, results)

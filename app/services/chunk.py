@@ -2,6 +2,7 @@ from io import BytesIO
 from functools import lru_cache
 import logging
 from time import perf_counter
+from pathlib import Path
 
 from docling.datamodel.base_models import DocumentStream
 from docling.document_converter import DocumentConverter
@@ -38,7 +39,7 @@ def get_document_converter():
     return converter
 
 
-async def chunking(
+def chunking(
     content: bytes,
     db: Session,
     document_id: int,
@@ -46,21 +47,39 @@ async def chunking(
 ):
     """使用 Docling 解析文件，再创建父子分片。"""
     total_started_at = perf_counter()
-    source = DocumentStream(
-        name=file_name,
-        stream=BytesIO(content),
-    )
-    converter = get_document_converter()
 
+    #把txt的分出来不用docling
     parse_started_at = perf_counter()
-    result = converter.convert(source)
-    text = result.document.export_to_markdown().strip()
+    is_txt = Path(file_name).suffix.lower() == ".txt"
+    if is_txt:
+        text = content.decode("utf-8-sig").strip()
+
+    else:
+        source = DocumentStream(
+            name=file_name,
+            stream=BytesIO(content),
+        )
+        converter = get_document_converter()
+
+        #转成结构化内容
+        result = converter.convert(source)
+        #转成md
+        text = result.document.export_to_markdown().strip()
+
     parse_ms = (perf_counter() - parse_started_at) * 1000
 
     if not text:
         raise ValueError("文件中没有解析到有效内容")
 
-    stats = splitter_creator(text, db, document_id)
+    #假如是txt就450 不是的话还是150
+    stats = splitter_creator(
+        text,
+        db,
+        document_id,
+        child_chunk_size=450 if is_txt else 150,
+        child_chunk_overlap=50 if is_txt else 30,
+    )
+
     logger.info(
         "event=document_chunked document_id=%s file_size_bytes=%s "
         "parse_ms=%.2f parent_split_ms=%.2f child_split_ms=%.2f "
@@ -79,7 +98,7 @@ async def chunking(
     )
 
 
-def splitter_creator(text, db, document_id):
+def splitter_creator(text, db, document_id, child_chunk_size, child_chunk_overlap):
     parent_splitter = RecursiveCharacterTextSplitter(
         chunk_size=2000,
         chunk_overlap=80,
@@ -89,8 +108,8 @@ def splitter_creator(text, db, document_id):
     parent_split_ms = (perf_counter() - parent_split_started_at) * 1000
 
     child_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=150,
-        chunk_overlap=30,
+        chunk_size=child_chunk_size,
+        chunk_overlap=child_chunk_overlap,
     )
 
     parent_index = 0
@@ -111,33 +130,38 @@ def splitter_creator(text, db, document_id):
         db.add(parent)
         flush_started_at = perf_counter()
         db.flush()
+        
         parent_db_flush_ms += (perf_counter() - flush_started_at) * 1000
 
         child_split_started_at = perf_counter()
+        #切子片
         child_texts = child_splitter.split_text(parent_text)
+        #去掉空子片
+        child_texts = [text for text in child_texts if text.strip()]
         child_split_ms += (perf_counter() - child_split_started_at) * 1000
+
+        if not child_texts:
+            continue
         embedding_model = get_embedding_model()
 
-        child_index = 0
-        for child_text in child_texts:
-            if not child_text:
-                continue
+        embedding_started_at = perf_counter()
+        vectors = embedding_model.encode(
+            child_texts,
+            batch_size=32,
+            normalize_embeddings=True,
+        )
+        embedding_ms += (perf_counter() - embedding_started_at) * 1000
 
-            embedding_started_at = perf_counter()
-            vector = embedding_model.encode(
-                child_text,
-                normalize_embeddings=True,
-            )
-            embedding_ms += (perf_counter() - embedding_started_at) * 1000
-            child = Child(
-                parent_id=parent.id,
-                content=child_text,
-                chunk_index=child_index,
-                embedding=vector.tolist(),
-            )
-            child_index += 1
-            child_count += 1
-            db.add(child)
+        child_index = 0
+        for child_index, (child_text, vector) in enumerate(zip(child_texts, vectors)):
+                child = Child(
+                    parent_id=parent.id,
+                    content=child_text,
+                    chunk_index=child_index,
+                    embedding=vector.tolist(),
+                )
+                child_count += 1
+                db.add(child)
 
     return {
         "parent_count": parent_index,
