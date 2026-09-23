@@ -4,7 +4,7 @@ from app.services.timetable_service import timetable_service
 
 from sqlalchemy.orm import Session
 from app.db.database import get_db
-
+from app.services.user_services import get_currentUser
 
     
 router = APIRouter()

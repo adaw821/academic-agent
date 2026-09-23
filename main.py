@@ -10,6 +10,7 @@ from app.models.document_child import Child
 
 from app.routers.timetable_upload import router as timetable_router
 from app.routers.rag import router as rag_router
+from app.routers.user_routers import router as user_router
 
 app = FastAPI()
 app.include_router(
@@ -19,4 +20,9 @@ app.include_router(
 app.include_router(
     rag_router,
     prefix="/api",
+)
+
+app.include_router(
+    user_router,
+    prefix="/api"
 )

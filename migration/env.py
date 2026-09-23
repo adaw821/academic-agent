@@ -14,6 +14,7 @@ from app.models.projects import Project
 from app.models.documents import Document
 from app.models.document_parents import Parent
 from app.models.document_child import Child
+from app.models.user_session import UserSession
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

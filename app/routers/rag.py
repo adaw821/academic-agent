@@ -5,6 +5,7 @@ from time import perf_counter
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from app.services.chunk import chunking
 from app.db.database import get_db, SessionLocal
@@ -13,8 +14,9 @@ from app.models.projects import Project
 from app.schemas.project_create import ProjectCreate
 from app.models.users import User
 from app.schemas.search import SearchRequest
-from app.services.search_services import search_children
+from app.services.search_services import search_vector, search_bm25, rrf_fuse, rerank_results
 from app.services.answer_services import generate_answer
+from app.services.user_services import get_currentUser
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
@@ -32,6 +34,38 @@ FILE_TYPES = {
 }
 
 UPLOAD_ROOT = Path("data/uploads")
+
+
+# 【前端配套新增：项目权限检查】供文档列表、文档状态、问答接口复用。
+def require_project(db: Session, project_id: int, user: User) -> Project:
+    # 登录校验解决“是谁”，这里进一步检查“能否访问这个项目”。
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if project.user_id != user.id:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+    return project
+# 【前端配套新增结束：项目权限检查】
+
+
+# 【前端配套新增：项目列表】前端侧栏展示当前用户的项目，刷新后也能重新读取。
+@router.get("/projects")
+def list_projects(db: Session = Depends(get_db), user: User = Depends(get_currentUser)):
+    # where 限定项目归属；按 ID 倒序展示。scalars().all() 取出多个 Project 对象。
+    projects = db.scalars(select(Project).where(Project.user_id == user.id).order_by(Project.id.desc())).all()
+    # 将数据库对象整理成前端需要的 JSON 字段。
+    return [{"id": p.id, "name": p.name} for p in projects]
+# 【前端配套新增结束：项目列表】
+
+
+# 【前端配套新增：文档列表】前端资料栏读取文件，并轮询排队、解析和完成状态。
+@router.get("/projects/{project_id}/documents")
+def list_documents(project_id: int, db: Session = Depends(get_db), user: User = Depends(get_currentUser)):
+    # 必须先确认项目属于当前用户，再读取该项目的文档。
+    require_project(db, project_id, user)
+    documents = db.scalars(select(Document).where(Document.project_id == project_id).order_by(Document.id.desc())).all()
+    return [{"id": d.id, "filename": d.filename, "status": d.status} for d in documents]
+
 
 # 普通 def 后台任务由框架放到线程池执行，使用独立数据库会话
 def process_document(document_id: int):
@@ -74,6 +108,7 @@ async def upload_files(
     files: list[UploadFile],
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    user: User = Depends(get_currentUser)
 ):
     """保存上传文件，返回后在后台切片入库。"""
     #计时起点
@@ -82,6 +117,9 @@ async def upload_files(
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
+
+    if project.user_id != user.id:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
 
     #给当前项目准备一个存放文件的文件夹
     project_directory = UPLOAD_ROOT / f"project_{project_id}"
@@ -190,7 +228,11 @@ def get_document_status(
     project_id: int,
     document_id: int,
     db: Session = Depends(get_db),
+    # 【前端配套修改】原接口补上登录检查，user 来自有效会话。
+    user: User = Depends(get_currentUser),
 ):
+    # 【前端配套修改】先检查项目归属，避免登录用户查询别人的文档状态。
+    require_project(db, project_id, user)
     document = db.get(Document, document_id)
     if document is None or document.project_id != project_id:
         raise HTTPException(status_code=404, detail="文档不存在")
@@ -205,16 +247,12 @@ def get_document_status(
 async def project_creator(
     project: ProjectCreate,
     db: Session = Depends(get_db),
+    # 【前端配套修改】根据 Cookie 得到当前用户，替代按请求中的 user_id 查用户。
+    user: User = Depends(get_currentUser),
 ):
-    user = db.get(User, project.user_id)
-    if user is None:
-        raise HTTPException(
-            status_code=404,
-            detail="用户不存在",
-        )
-
     new_project = Project(
-        user_id=project.user_id,
+        # 【前端配套修改】项目归属使用登录用户 ID，防止客户端指定别人的 ID。
+        user_id=user.id,
         name=project.name,
     )
     db.add(new_project)
@@ -231,12 +269,20 @@ def user_asking(
     project_id: int,
     request: SearchRequest,
     db: Session = Depends(get_db),
+    #提问前先验证登录状态。
+    user: User = Depends(get_currentUser),
 ):
     """问答检索接口"""
-    project = db.get(Project, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="所选项目不存在")
-    results=[]
-    results = search_children(request.query, project_id, db, request.top_k)
+    # 替代原来只检查项目存在的逻辑，同时检查项目归属。
+    # 通过后继续调用你原有的检索与回答函数。
+    require_project(db, project_id, user)
+    #存向量检索结果
+    results_vector = search_vector(request.query, project_id, db, request.candidate_k)
 
-    return generate_answer(request.query, results)
+    #存关键词检索结果
+    results_BM25 = search_bm25(request.query, project_id, db, request.candidate_k)
+
+    #rrf排序
+    merged=rrf_fuse(results_vector, results_BM25)
+    final_chunks = rerank_results(request.query, merged)
+    return generate_answer(request.query, final_chunks)
