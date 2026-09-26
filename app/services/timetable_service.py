@@ -1,8 +1,12 @@
 import base64
 import json
+import logging
 import os
+from io import BytesIO
 
 from langchain_openai import ChatOpenAI
+from openai import APIError
+from PIL import Image, UnidentifiedImageError
 
 from sqlalchemy.orm import Session
 
@@ -11,6 +15,21 @@ from app.models.course_timetable import CourseSchedule
 
 from sqlalchemy import select
 from langchain_core.messages import HumanMessage
+
+logger = logging.getLogger(__name__)
+
+
+class TimetableImageError(ValueError):
+    """The upload is not a decodable PNG or JPEG image."""
+
+
+class TimetableParseError(ValueError):
+    """No usable timetable could be extracted from the image."""
+
+
+class TimetableProviderError(RuntimeError):
+    """The upstream vision service failed."""
+
 
 llm = ChatOpenAI(
     model="glm-4.6v",
@@ -94,9 +113,9 @@ NECESSARY_ATTRIBUTES = [
     "end_time",
 ]
 
-async def timetable_service(content: bytes, db: Session, content_type: str):
+async def timetable_service(content: bytes, db: Session, content_type: str, user_id: int):
     complete, timetables = await content_parse(content, content_type)
-    await timetable_database(timetables, db)
+    await timetable_database(timetables, db, user_id)
     if complete:
         return{
             "message": "课表解析成功",
@@ -115,9 +134,10 @@ def add_schedule(course, timetable, db):
     schedule.location = timetable.get("location")
     db.add(schedule)
 
-def add_course(db, timetable, course_name, course_code):
+def add_course(db, timetable, course_name, course_code, user_id: int):
     """把数据加到course表"""
     course = Course()
+    course.user_id = user_id
     course.course_name = course_name
     course.course_code = course_code
     course.teachers = timetable.get("teachers")
@@ -148,13 +168,16 @@ def data_update(course, timetable):
     if course.units is None and timetable.get("units") is not None:
         course.units = timetable.get("units")
 
-async def timetable_database(timetables:list, db:Session):
+async def timetable_database(timetables:list, db:Session, user_id: int):
         """数据入库"""
         try:
             for timetable in timetables:
                 course_code = timetable.get("course_code")
                 if course_code:
-                    course = db.scalar(select(Course).where(Course.course_code == course_code))
+                    course = db.scalar(select(Course).where(
+                        Course.user_id == user_id,
+                        Course.course_code == course_code,
+                    ))
                     if course:
                         data_update(course, timetable)
                         if check_duplicate(db, timetable, course):
@@ -163,9 +186,12 @@ async def timetable_database(timetables:list, db:Session):
                         add_schedule(course, timetable, db)
                     else:
                         course_name = timetable.get("course_name")
-                        course = db.scalar(select(Course).where(Course.course_name==course_name))
+                        course = db.scalar(select(Course).where(
+                            Course.user_id == user_id,
+                            Course.course_name == course_name,
+                        ))
                         if not course:
-                            course = add_course(db, timetable, course_name, course_code)
+                            course = add_course(db, timetable, course_name, course_code, user_id)
                         
                         data_update(course, timetable)
 
@@ -174,9 +200,12 @@ async def timetable_database(timetables:list, db:Session):
                         add_schedule(course, timetable, db)
                 else:
                         course_name = timetable.get("course_name")
-                        course = db.scalar(select(Course).where(Course.course_name==course_name))
+                        course = db.scalar(select(Course).where(
+                            Course.user_id == user_id,
+                            Course.course_name == course_name,
+                        ))
                         if not course:
-                            course = add_course(db, timetable, course_name, course_code)
+                            course = add_course(db, timetable, course_name, course_code, user_id)
                         
                         data_update(course, timetable)
 
@@ -192,74 +221,73 @@ async def timetable_database(timetables:list, db:Session):
        
    
     
-async def content_parse(content: bytes, content_type: str):
-    """图片解析"""
+def validate_image(content: bytes, content_type: str):
+    """Validate the actual image before sending it to the vision service."""
+    expected_format = {"image/png": "PNG", "image/jpeg": "JPEG"}.get(content_type)
+    if expected_format is None:
+        raise TimetableImageError("图片类型错误，请上传 PNG 或 JPEG 图片")
     try:
-        if not content:
-            raise ValueError("图片不能为空")
-        
-        img_base64 = base64.b64encode(content)
-        processed_content = img_base64.decode("utf-8")
-        
-        message = HumanMessage(
-            content=[
-                {
-                    "type": "text",
-                    "text": TEXT
+        with Image.open(BytesIO(content)) as image:
+            if image.format != expected_format:
+                raise TimetableImageError("图片内容与文件类型不符，请重新上传 PNG 或 JPEG 图片")
+            image.verify()
+        # verify() checks the file structure; load() also detects truncated pixel data.
+        with Image.open(BytesIO(content)) as image:
+            image.load()
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError,
+            Image.DecompressionBombError) as exc:
+        if isinstance(exc, TimetableImageError):
+            raise
+        raise TimetableImageError("图片已损坏或无法读取，请重新上传完整的 PNG 或 JPEG 图片") from exc
+
+
+async def content_parse(content: bytes, content_type: str):
+    """图片解析；输入、识别和上游调用错误分别处理。"""
+    validate_image(content, content_type)
+    processed_content = base64.b64encode(content).decode("utf-8")
+    message = HumanMessage(
+        content=[
+            {"type": "text", "text": TEXT},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{content_type};base64,{processed_content}",
                 },
-                
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": (
-                            f"data:{content_type};"
-                            f"base64,{processed_content}"
-                        )
-                    },
-                }
-            ]
-        )
+            },
+        ]
+    )
+    try:
         response = await llm.ainvoke([message])
-        
-        response_content = response.content
-        if not response_content:
-            raise ValueError("没有解析出课表内容")
-        
-        #根据[]分割json，防止返回出现别的
-        start = response_content.find("[")
-        end = response_content.rfind("]")
-        if start==-1 or end==-1:
-            raise ValueError("json解析有问题")
-        json_text =response_content[start:end+1]
-        timetables = json.loads(json_text)
-        if not isinstance(timetables, list) or not timetables:
-            raise ValueError("课程表为空")
-        
-        valid_timetables = []
+    except APIError as exc:
+        logger.exception("Timetable vision service request failed")
+        raise TimetableProviderError("课表识别服务暂时不可用，请稍后重试") from exc
 
-        for timetable in timetables:
-            if not isinstance(timetable, dict):
-                continue
-            
-            empty = False
+    retry_message = "未能识别出有效课表，请上传包含课程名称、地点和上课时间的清晰图片"
+    response_content = response.content
+    if not isinstance(response_content, str) or not response_content.strip():
+        raise TimetableParseError(retry_message)
 
-            if set(timetable.keys()) != EXPECTED_ATTRIBUTES:
-                continue
+    # 根据 [] 分割 JSON，兼容模型返回的代码块和说明文字。
+    start = response_content.find("[")
+    end = response_content.rfind("]")
+    if start == -1 or end == -1:
+        raise TimetableParseError(retry_message)
+    try:
+        timetables = json.loads(response_content[start:end + 1])
+    except json.JSONDecodeError as exc:
+        raise TimetableParseError(retry_message) from exc
+    if not isinstance(timetables, list) or not timetables:
+        raise TimetableParseError(retry_message)
 
-            for key in NECESSARY_ATTRIBUTES:
-                value = timetable.get(key)
+    valid_timetables = []
+    for timetable in timetables:
+        if not isinstance(timetable, dict):
+            continue
+        if set(timetable.keys()) != EXPECTED_ATTRIBUTES:
+            continue
+        if all(timetable.get(key) for key in NECESSARY_ATTRIBUTES):
+            valid_timetables.append(timetable)
 
-                if not value:
-                    empty = True
-                    break
-
-            if not empty:
-                valid_timetables.append(timetable)
-            
-        if not valid_timetables:
-            raise ValueError("所有课程都缺少必要字段")
-        
-        #返回解析是否完全， 和有效字段课程表
-        return len(valid_timetables) == len(timetables), valid_timetables
-    except Exception:
-        raise ValueError("解析图片失败")
+    if not valid_timetables:
+        raise TimetableParseError(retry_message)
+    return len(valid_timetables) == len(timetables), valid_timetables

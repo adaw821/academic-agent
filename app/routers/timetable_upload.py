@@ -1,9 +1,15 @@
 from fastapi import APIRouter, UploadFile, File, Depends
 from fastapi import HTTPException
-from app.services.timetable_service import timetable_service
+from app.services.timetable_service import (
+    TimetableImageError,
+    TimetableParseError,
+    TimetableProviderError,
+    timetable_service,
+)
 
 from sqlalchemy.orm import Session
 from app.db.database import get_db
+from app.models.users import User
 from app.services.user_services import get_currentUser
 
     
@@ -13,7 +19,11 @@ TYPE_ALLOWED = [
     "image/png",
 ]
 @router.post("/timetable")
-async def timetable_process(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def timetable_process(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_currentUser),
+):
     content = await file.read()
     if not content:
         raise HTTPException(
@@ -29,5 +39,12 @@ async def timetable_process(file: UploadFile = File(...), db: Session = Depends(
                 status_code=400,
                 detail="图片类型错误"
             )
-    result = await timetable_service(content, db, content_type)
+    try:
+        result = await timetable_service(content, db, content_type, user.id)
+    except TimetableImageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TimetableParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TimetableProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     return result
