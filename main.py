@@ -9,7 +9,7 @@ from app.models.document_parents import Parent
 from app.models.document_child import Child
 
 from app.routers.timetable_upload import router as timetable_router
-from app.routers.rag import router as rag_router
+from app.routers.rag_flow import router as rag_router
 from app.routers.user_routers import router as user_router
 
 app = FastAPI()

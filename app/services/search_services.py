@@ -5,6 +5,12 @@ from app.models.document_child import Child
 from sqlalchemy import select
 from app.models.document_parents import Parent
 from app.models.documents import Document
+from app.models.conversation import Conversation
+from app.models.message import Message
+from app.services.answer_services import llm
+from app.services.context_management import count_message_tokens, is_over_budget
+from fastapi import HTTPException
+from uuid import uuid4
 
 import re
 import jieba
@@ -13,6 +19,11 @@ from functools import lru_cache
 from sentence_transformers import CrossEncoder
 from torch.nn import Sigmoid
 
+from langchain_core.messages import SystemMessage, HumanMessage
+
+REWRITE_CONTEXT_LIMIT = 65_536
+REWRITE_OUTPUT_TOKENS = 8_192
+REWRITE_SAFETY_MARGIN = 1_024
 
 def tokenize_for_bm25(text: str) -> list[str]:
     """把一句话拆成词"""
@@ -26,7 +37,7 @@ def tokenize_for_bm25(text: str) -> list[str]:
         for word in jieba.cut_for_search(text)
         #去空白检查是不是有效内容，有效才返回
         if (token := word.strip()) and re.search(r"\w", token)
-    ] 
+    ]
 
 def embedding_query(query):
     """将问题转换成向量"""
@@ -41,12 +52,71 @@ def embedding_query(query):
 
     return vector.tolist()
 
+def rewrite_query(
+    query: str,
+    histories: list[dict],
+    summary: str = "",
+) -> str:
+    """根据历史记录补充问题，方便查找资料完善"""
+    if not histories and not summary:
+        return query
+
+    history_strings = []
+    for history in histories:
+        history_string = (
+            f"role:{history["role"]}\n\n"
+            f"\ncontent:{history["content"]}"
+            )
+        history_strings.append(history_string)
+
+    history_context = "\n\n".join(history_strings)
+    if summary:
+        history_context = f"已有历史摘要:\n{summary}\n\n后续历史:\n{history_context}"
+
+    messages = [
+        SystemMessage(
+        content=(
+            "你是一个检索问题改写助手。"
+            "请根据历史对话，将当前用户请求改写为无需历史也能理解的独立请求。"
+            "只补全历史中有明确依据的指代和省略，保留当前请求的原意、条件和语言。"
+            "不要添加无关历史信息，不要编造细节；无法确定的指代不要猜测。"
+            "如果当前请求已经完整，原样返回。"
+            "只输出改写后的请求，不回答请求，不解释改写过程。"
+        )
+    ),
+        HumanMessage(
+            content=(
+                f"问题:\n{query}\n\n"
+                f"历史资料:\n{history_context}"
+            )
+        )
+    ]
+
+    message_data = [
+        {"role": "system", "content": messages[0].content},
+        {"role": "user", "content": messages[1].content},
+    ]
+    if is_over_budget(
+        count_message_tokens(message_data),
+        REWRITE_CONTEXT_LIMIT, REWRITE_OUTPUT_TOKENS, REWRITE_SAFETY_MARGIN,
+    ):
+        raise HTTPException(status_code=400, detail="问题和历史超过问题改写的输入预算，请减少输入。")
+
+    response = llm.bind(max_tokens=REWRITE_OUTPUT_TOKENS).invoke(messages)
+    if response.response_metadata.get("finish_reason") == "length":
+        raise HTTPException(status_code=502, detail="问题改写达到输出上限，未继续检索。")
+    if not isinstance(response.content, str):
+        raise ValueError("问题改写模型未返回文本")
+    return response.content.strip() or query
+
+
+
 #向量召回
 def search_vector(
         query: str,
         project_id: int,
         db: Session,
-        candidate_k: int
+        candidate_k: int,
 ):
     """用来查找问题相似文件的"""
     query_vector = embedding_query(query)
@@ -67,7 +137,7 @@ def search_vector(
 
     #查出来的结果,里边是child对象和distance
     rows = db.execute(stmt).all()
-    
+
     #整理查到的子片
     results = []
 
@@ -89,7 +159,7 @@ def search_bm25(
     query: str,
     project_id: int,
     db: Session,
-    candidate_k: int
+    candidate_k: int,
 ):
     query_tokens = tokenize_for_bm25(query)
     if not query_tokens:
@@ -130,7 +200,7 @@ def search_bm25(
 
     if not records:
         return []
-    
+
     bm25 = BM25Okapi(child_contents_token)
 
     scores = bm25.get_scores(query_tokens)
@@ -218,7 +288,7 @@ def rerank_results(
 
     model = get_reranker()
     scores = model.predict(
-        pairs, 
+        pairs,
         batch_size=4,
         activation_fn=Sigmoid(),
         )
@@ -233,7 +303,7 @@ def rerank_results(
     key=lambda item:item["rerank_score"],
     reverse=True
 )
-    
+
     return chunk_filter(parents)
 
 #过滤
@@ -249,10 +319,63 @@ def chunk_filter(
         if len(results)==top_k:
             break
 
-    return results   
+    return results
 
+def history_messages_control(
+    answer:str,
+    query: str,
+    conversation_id: int | None,
+    db: Session,
+    project_id: int
+):
 
+    #用来标识某个问题和回答是同一轮
+    turn_id = uuid4().hex
+    if not conversation_id:
+        conversation = Conversation(project_id = project_id)
+        db.add(conversation)
+        db.flush()
 
+        question = Message(
+            conversation_id = conversation.id,
+            content = query,
+            role = "user",
+            turn_id = turn_id
+        )
+
+        reply = Message(
+            conversation_id = conversation.id,
+            content = answer,
+            role = "assistant",
+            turn_id = turn_id
+        )
+
+        db.add_all([question, reply])
+        db.commit()
+        return conversation.id
+
+    else:
+        conversation = db.get(Conversation, conversation_id)
+        if not conversation or conversation.project_id != project_id:
+            raise HTTPException(status_code=404, detail="会话不存在")
+
+        question = Message(
+            conversation_id = conversation_id,
+            content = query,
+            role = "user",
+            turn_id = turn_id
+        )
+
+        reply = Message(
+            conversation_id = conversation_id,
+            content = answer,
+            role = "assistant",
+            turn_id = turn_id
+        )
+
+        db.add_all([question, reply])
+        db.commit()
+        return conversation_id
 
 
 @lru_cache(maxsize=1)

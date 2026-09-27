@@ -14,8 +14,8 @@ from app.models.projects import Project
 from app.schemas.project_create import ProjectCreate
 from app.models.users import User
 from app.schemas.search import SearchRequest
-from app.services.search_services import search_vector, search_bm25, rrf_fuse, rerank_results
-from app.services.answer_services import generate_answer
+from app.services.search_services import search_vector, search_bm25, rrf_fuse, rerank_results, history_messages_control, rewrite_query
+from app.services.answer_services import generate_answer, get_history_messages
 from app.services.user_services import get_currentUser
 
 logger = logging.getLogger("uvicorn.error")
@@ -251,7 +251,6 @@ async def project_creator(
     user: User = Depends(get_currentUser),
 ):
     new_project = Project(
-        # 【前端配套修改】项目归属使用登录用户 ID，防止客户端指定别人的 ID。
         user_id=user.id,
         name=project.name,
     )
@@ -276,13 +275,28 @@ def user_asking(
     # 替代原来只检查项目存在的逻辑，同时检查项目归属。
     # 通过后继续调用你原有的检索与回答函数。
     require_project(db, project_id, user)
+
+    #检索前校验会话并读取一次历史，供问题改写和最终回答共用。
+    history, summary, summary_boundary = get_history_messages(request.conversation_id, db, project_id)
+    search_query = rewrite_query(request.query, history, summary=summary)
     #存向量检索结果
-    results_vector = search_vector(request.query, project_id, db, request.candidate_k)
+    results_vector = search_vector(search_query, project_id, db, request.candidate_k)
 
     #存关键词检索结果
-    results_BM25 = search_bm25(request.query, project_id, db, request.candidate_k)
+    results_BM25 = search_bm25(search_query, project_id, db, request.candidate_k)
 
     #rrf排序
     merged=rrf_fuse(results_vector, results_BM25)
-    final_chunks = rerank_results(request.query, merged)
-    return generate_answer(request.query, final_chunks)
+    #最终得到的片
+    final_chunks = rerank_results(search_query, merged)
+
+    #生成回答
+    final_result = generate_answer(
+        request.query, final_chunks, history, request.conversation_id, db, project_id,
+        summary=summary,
+        summary_boundary=summary_boundary,
+    )
+    #保存对话历史
+    conversation_id = history_messages_control(final_result["answer"], request.query, request.conversation_id, db, project_id)
+    final_result["conversation_id"] = conversation_id
+    return final_result

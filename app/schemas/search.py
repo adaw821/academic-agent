@@ -9,3 +9,5 @@ class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=10000)
     #需要检索几个子片
     candidate_k: int = Field(default=50, ge=1, le=100)
+    #会话id
+    conversation_id: int | None = Field(default=None, ge=1)
