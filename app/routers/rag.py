@@ -2,6 +2,8 @@ from pathlib import Path
 from uuid import uuid4
 import logging
 from time import perf_counter
+import os
+import json
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -17,6 +19,17 @@ from app.schemas.search import SearchRequest
 from app.services.search_services import search_vector, search_bm25, rrf_fuse, rerank_results
 from app.services.answer_services import generate_answer
 from app.services.user_services import get_currentUser
+
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+
+translator = ChatOpenAI(
+    model = "glm-4.5-airx",
+    base_url="https://open.bigmodel.cn/api/paas/v4/",
+    api_key=os.environ["ZHIPU_API_KEY"],
+    timeout=15,
+    max_retries=0,
+)
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
@@ -228,10 +241,8 @@ def get_document_status(
     project_id: int,
     document_id: int,
     db: Session = Depends(get_db),
-    # 【前端配套修改】原接口补上登录检查，user 来自有效会话。
     user: User = Depends(get_currentUser),
 ):
-    # 【前端配套修改】先检查项目归属，避免登录用户查询别人的文档状态。
     require_project(db, project_id, user)
     document = db.get(Document, document_id)
     if document is None or document.project_id != project_id:
@@ -251,7 +262,6 @@ async def project_creator(
     user: User = Depends(get_currentUser),
 ):
     new_project = Project(
-        # 【前端配套修改】项目归属使用登录用户 ID，防止客户端指定别人的 ID。
         user_id=user.id,
         name=project.name,
     )
@@ -264,6 +274,29 @@ async def project_creator(
         "project_id": new_project.id,
     }
 
+def require_document_scope(
+    db: Session, project_id: int, doc_ids: list[int] | None
+) -> list[int] | None:
+    """项目鉴权后校验显式文档范围；任何无效 ID 都不能静默忽略。"""
+    if doc_ids is None:
+        return None
+    if not doc_ids:
+        raise HTTPException(status_code=422, detail="doc_ids 不能为空列表")
+
+    unique_ids = list(dict.fromkeys(doc_ids))
+    documents = db.execute(
+        select(Document.id, Document.status).where(
+            Document.project_id == project_id,
+            Document.id.in_(unique_ids),
+        )
+    ).all()
+    if len(documents) != len(unique_ids):
+        raise HTTPException(status_code=404, detail="指定文档不存在或不属于当前项目")
+    if any(document.status != "completed" for document in documents):
+        raise HTTPException(status_code=409, detail="指定文档尚未完成处理，请检查文档状态")
+    return unique_ids
+
+
 @router.post("/projects/{project_id}/ask")
 def user_asking(
     project_id: int,
@@ -273,16 +306,90 @@ def user_asking(
     user: User = Depends(get_currentUser),
 ):
     """问答检索接口"""
-    # 替代原来只检查项目存在的逻辑，同时检查项目归属。
-    # 通过后继续调用你原有的检索与回答函数。
+    # 先确认检索范围有效，再调用可选的翻译服务。
     require_project(db, project_id, user)
-    #存向量检索结果
-    results_vector = search_vector(request.query, project_id, db, request.candidate_k)
+    doc_ids = require_document_scope(db, project_id, request.doc_ids)
+    original_query = request.query
+    translated_query = None
 
-    #存关键词检索结果
-    results_BM25 = search_bm25(request.query, project_id, db, request.candidate_k)
+    #对问题进行翻译 中英文一起检索
+    translation_message = [
+        SystemMessage(
+            content=(
+                "你是一个专业的问题翻译助手。\n\n"
+                "任务：\n"
+                "- 如果输入问题主要为中文，将其翻译成英文。\n"
+                "- 如果输入问题主要为英文，将其翻译成中文。\n\n"
+                "要求：\n"
+                "1. 准确保留原问题的语义，不得增加、删除或猜测任何信息。\n"
+                "2. 专业术语必须使用对应领域中标准、常用的专业译法。\n"
+                "3. 产品名、型号、缩写、代码、专有名词等，如果没有必要，不要翻译或改写。\n"
+                "4. 不要回答用户的问题，只进行翻译。\n"
+                "5. 不要解释翻译过程，不要添加任何说明、前缀或后缀。\n"
+                "6. 保持原问题的检索意图，避免为了语言自然度而改变关键词含义。\n"
+                "7. 如果某个术语存在歧义且无法根据原文确定，不要自行猜测，尽可能保留原术语。\n\n"
+                "必须严格返回合法 JSON，不要使用 Markdown 代码块，也不要输出其他内容。\n"
+                '翻译失败时，将 translation 字段设为 JSON 的 null，不要返回字符串 "None"。\n'
+                "返回格式如下：\n"
+                "{\n"
+                '  "original": "原始问题",\n'
+                '  "translation": "翻译后的问题"\n'
+                "}"
+            )
+        ),
+        HumanMessage(
+            content=f"query={request.query}"
+        )
+    ]
 
+    # 翻译仅为辅助；调用、解析或字段校验失败都回退到原问题。
+    try:
+        response = translator.invoke(translation_message)
+        translation_results = json.loads(response.content)
+        if not isinstance(translation_results, dict):
+            raise ValueError("翻译结果必须是 JSON 对象")
+        translation = translation_results["translation"]
+        if translation is not None:
+            if not isinstance(translation, str):
+                raise ValueError("translation 必须是字符串或 null")
+            translation = translation.strip()
+            if not translation or translation.casefold() in {"none", "null"}:
+                raise ValueError("译文为空或无效")
+            translated_query = translation
+    except Exception as exc:
+        # 不将用户问题、模型原始输出或异常详情写入日志。
+        logger.warning("event=query_translation_failed error_type=%s", type(exc).__name__)
+        translated_query = None
+
+    #两次中英文问题得到的检索结果
+    original_vector_results, original_BM25_results  = retrieve_documents(original_query, project_id, db, request.candidate_k_percentage, doc_ids)
+    if translated_query is not None:
+        translated_vector_results, translated_BM25_results = retrieve_documents(translated_query, project_id, db, request.candidate_k_percentage, doc_ids)
+    else:
+        translated_vector_results, translated_BM25_results = [], []
+
+    results_vector = original_vector_results + translated_vector_results
+    results_BM25 = original_BM25_results + translated_BM25_results
     #rrf排序
     merged=rrf_fuse(results_vector, results_BM25)
-    final_chunks = rerank_results(request.query, merged)
+    final_chunks = rerank_results(request.query, translated_query, merged)
     return generate_answer(request.query, final_chunks)
+
+def retrieve_documents(
+        query: str,
+        project_id: int,
+        db: Session,
+        candidate_k_percentage: float,
+        doc_ids: list[int] | None
+):
+    #向量检索结果
+    results_vector = search_vector(
+        query, project_id, db, candidate_k_percentage, doc_ids=doc_ids
+    )
+
+    #存关键词检索结果
+    results_BM25 = search_bm25(
+        query, project_id, db, candidate_k_percentage, doc_ids=doc_ids
+    )
+
+    return results_vector,results_BM25
