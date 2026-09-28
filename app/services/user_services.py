@@ -15,7 +15,7 @@ def generate_token(user_id: int, db: Session):
         token.encode("utf-8")
     ).hexdigest()
 
-    expired_time = datetime.now(timezone.utc) + timedelta(minutes=1)
+    expired_time = datetime.now(timezone.utc) + timedelta(minutes=30)
 
     new_session = UserSession(
         token_hash=token_hash,
