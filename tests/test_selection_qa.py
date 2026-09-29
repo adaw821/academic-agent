@@ -155,16 +155,17 @@ class SelectionTests(unittest.TestCase):
                                   ({"exclude_document_id": 11}, {12}),
                                   ({"document_id": 21}, set()), ({"document_id": 13}, set())]:
             with self.subTest(filters=filters):
-                result = search.search_bm25("gene", 1, self.db, 50, **filters)
+                result = search.search_bm25("gene", 1, self.db, 1, **filters)
                 self.assertEqual({r["document_id"] for r in result}, expected)
 
     def test_vector_scope_sql(self):
         for filters, clause in [({}, None), ({"document_id": 11}, "documents.id = 11"),
                                 ({"exclude_document_id": 11}, "documents.id != 11")]:
             db = Mock()
+            db.scalar.side_effect = self.db.scalar
             db.execute.return_value.all.return_value = []
             with patch.object(search, "embedding_query", return_value=[0.0] * 1024):
-                search.search_vector("gene", 1, db, 50, **filters)
+                search.search_vector("gene", 1, db, 0.4, **filters)
             sql = str(db.execute.call_args.args[0].compile(
                 dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
             self.assertIn("documents.project_id = 1", sql)
@@ -180,13 +181,79 @@ class SelectionTests(unittest.TestCase):
                 with patch.object(search, "search_vector", return_value=[]) as vector, \
                      patch.object(search, "search_bm25", return_value=[]) as bm25, \
                      patch.object(search, "rerank_results", side_effect=[local, others]):
-                    result = search.search_document_first("gene", 1, 11, self.db, 50)
+                    result = search.search_document_first("gene", 1, 11, self.db, 0.4)
                 supplement_count = min(other_count, 5-min(local_count, 3))
                 self.assertEqual(result, local[:5-supplement_count] + others[:supplement_count])
                 self.assertEqual(len(result), min(5, local_count+other_count))
                 for mock in (vector, bm25):
-                    self.assertEqual(mock.call_args_list[0].kwargs, {"document_id": 11})
-                    self.assertEqual(mock.call_args_list[1].kwargs, {"exclude_document_id": 11})
+                    self.assertEqual(mock.call_args_list[0].kwargs, {"doc_ids": None, "document_id": 11})
+                    self.assertEqual(mock.call_args_list[1].kwargs, {"doc_ids": None, "exclude_document_id": 11})
+
+    def test_explicit_scope_selection_and_translation_share_boundaries(self):
+        with self.models(), patch.object(rag, "search_document_first", search.search_document_first), \
+             patch.object(rag, "translate_query", return_value="translated selection"), \
+             patch.object(search, "search_vector", return_value=[]) as vector, \
+             patch.object(search, "search_bm25", return_value=[]) as bm25:
+            response = self.ask(doc_ids=[11, 12, 11], candidate_k_percentage=0.25)
+            self.assertEqual(response.status_code, 200, response.text)
+            for retrieve in (vector, bm25):
+                self.assertEqual(retrieve.call_count, 4)
+                for index, call in enumerate(retrieve.call_args_list):
+                    self.assertEqual(call.args[3], 0.25)
+                    self.assertEqual(call.kwargs["doc_ids"], [11, 12])
+                    scope = "document_id" if index < 2 else "exclude_document_id"
+                    self.assertEqual(call.kwargs[scope], 11)
+                    if index % 2:
+                        self.assertEqual(call.args[0], "translated selection")
+                    else:
+                        self.assertIn("gene passage", call.args[0])
+
+    def test_invalid_explicit_scope_stops_before_translation(self):
+        for ids, status in [([], 422), ([12], 422), ([11, 21], 404), ([11, 13], 409)]:
+            with self.subTest(ids=ids), patch.object(rag, "translate_query") as translate:
+                self.assertEqual(self.ask(doc_ids=ids).status_code, status)
+                translate.assert_not_called()
+
+    def test_percentage_denominator_applies_all_scope_filters(self):
+        for filters, expected in [
+            ({"document_id": 11}, 1), ({"exclude_document_id": 11}, 1),
+            ({"doc_ids": [11], "exclude_document_id": 11}, 0),
+            ({"doc_ids": [12], "document_id": 11}, 0),
+        ]:
+            with self.subTest(filters=filters), patch.object(search, "embedding_query", return_value=[0.0] * 1024) as embed:
+                db = Mock()
+                db.scalar.side_effect = self.db.scalar
+                db.execute.return_value.all.return_value = []
+                search.search_vector("gene", 1, db, 0.4, **filters)
+                self.assertEqual(len(search.search_bm25("gene", 1, self.db, 0.4, **filters)), expected)
+                if expected:
+                    compiled = db.execute.call_args.args[0].compile(dialect=postgresql.dialect())
+                    self.assertEqual(compiled.params["param_1"], expected)
+                else:
+                    db.execute.assert_not_called()
+                    embed.assert_not_called()
+
+    def test_rewritten_query_is_translated_and_original_question_is_saved(self):
+        cases = [("{\"translation\": \"translated standalone\"}", False, 2),
+                 ("not JSON", False, 1), ("", True, 1)]
+        for content, fails, calls in cases:
+            with self.subTest(content=content), self.models(), \
+                 patch.object(rag, "rewrite_query", return_value="standalone question"), \
+                 patch.object(rag.translator, "invoke", return_value=SimpleNamespace(content=content),
+                              side_effect=TimeoutError("test") if fails else None) as translate, \
+                 patch.object(rag, "search_vector", return_value=[]) as vector, \
+                 patch.object(rag, "rerank_results", return_value=[]) as rerank:
+                response = self.client.post("/api/projects/1/ask", json={
+                    "query": "what about it?", "conversation_id": 1, "doc_ids": [11],
+                })
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertIn("standalone question", translate.call_args.args[0][1].content)
+                self.assertEqual(vector.call_count, calls)
+                self.assertEqual(vector.call_args_list[0].args[0], "standalone question")
+                self.assertEqual(rerank.call_args.args[:2],
+                                 ("standalone question", "translated standalone" if calls == 2 else None))
+        messages = self.db.scalars(select(common.Message).where(common.Message.role == "user")).all()
+        self.assertTrue(all(message.content == "what about it?" for message in messages))
 
 
 if __name__ == "__main__":

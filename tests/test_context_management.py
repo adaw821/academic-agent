@@ -45,6 +45,9 @@ def model(content="answer", finish="stop"):
 
 class ContextTests(unittest.TestCase):
     def setUp(self):
+        translation = patch.object(rag_flow, "translator", model('{"translation": null}'))
+        translation.start()
+        self.addCleanup(translation.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.engine = create_engine("sqlite:///" + (Path(self.temp.name) / "test.db").as_posix())
         Base.metadata.create_all(self.engine, tables=[
@@ -89,7 +92,7 @@ class ContextTests(unittest.TestCase):
 
     def test_new_conversation_and_route_save(self):
         self.assertEqual(answers.get_history_messages(None, self.db, 1), ([], "", None))
-        request = SearchRequest(query="question", conversation_id=None, candidate_k=5)
+        request = SearchRequest(query="question", conversation_id=None, candidate_k_percentage=0.4)
         with patch.object(search, "llm", model()) as rewrite, patch.object(answers, "llm", model()), \
              patch.object(answers, "count_message_tokens", return_value=100), \
              patch.object(rag_flow, "search_vector", return_value=[]), \
@@ -277,7 +280,7 @@ class ContextTests(unittest.TestCase):
     def test_failed_answer_never_saves_turn(self):
         for content, finish in [("partial", "length"), ("", "stop"), ([], "stop")]:
             with self.subTest(content=content, finish=finish):
-                request = SearchRequest(query="question", conversation_id=1, candidate_k=5)
+                request = SearchRequest(query="question", conversation_id=1, candidate_k_percentage=0.4)
                 with patch.object(answers, "llm", model(content, finish)), \
                      patch.object(answers, "count_message_tokens", return_value=100), \
                      patch.object(rag_flow, "search_vector", return_value=[]), \

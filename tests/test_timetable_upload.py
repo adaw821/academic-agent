@@ -111,6 +111,18 @@ class TimetableUploadTests(unittest.TestCase):
         vision_patch = patch.object(service, "llm", SimpleNamespace(ainvoke=self.vision))
         vision_patch.start()
         self.addCleanup(vision_patch.stop)
+        env_patch = patch.dict(os.environ, {"ZHIPU_API_KEY": "unused-test-key"})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        # Exercise the real OCR request/validation path without contacting the provider.
+        self.ocr = AsyncMock()
+        self.ocr.post.return_value = httpx.Response(
+            200, json={"md_results": "OCR course text"},
+            request=httpx.Request("POST", service.LAYOUT_PARSING_URL),
+        )
+        ocr_patch = patch.object(service.httpx, "AsyncClient")
+        ocr_patch.start().return_value.__aenter__.return_value = self.ocr
+        self.addCleanup(ocr_patch.stop)
 
     def upload(self, user_id=1, rows=None, mime="image/png", content=None,
                model_content=UNSET, form_data=None):

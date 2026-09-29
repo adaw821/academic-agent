@@ -1,5 +1,17 @@
 # Academic Agent 测试指南
 
+## 网页前端
+
+前端代码独立放在 [`frontend/`](frontend/README.md)，使用 Vue 3、TypeScript 和 Vite。先启动本机 8000 端口的后端，再在另一个终端执行：
+
+```powershell
+cd frontend
+npm ci
+npm run dev
+```
+
+访问 http://127.0.0.1:5173 ，即可注册登录、创建项目、上传文档并提问。聊天记录暂存在页面内，刷新会清空。项目相关接口现在需要登录 Cookie；旧测试脚本需先登录并保留 Cookie。完整说明见前端 README。
+
 本文档用于帮助测试人员在本地启动项目，并测试文档上传、Docling 解析、父子分片和向量入库效果。
 
 首次搭建请先阅读 [本地环境安装与启动](ENVIRONMENT.md)，包含 Python、PostgreSQL、pgvector、迁移和独立 Ragas 环境。问答测试按 [问答功能测试指南](问答功能测试指南.md) 执行。

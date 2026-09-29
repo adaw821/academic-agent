@@ -1,6 +1,7 @@
 from pathlib import Path
 from uuid import uuid4
 import json
+import os
 import logging
 from time import perf_counter
 
@@ -18,6 +19,17 @@ from app.schemas.search import SearchRequest
 from app.services.search_services import search_vector, search_bm25, rrf_fuse, rerank_results, history_messages_control, rewrite_query, search_document_first
 from app.services.answer_services import generate_answer, get_history_messages
 from app.services.user_services import get_currentUser
+
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+
+translator = ChatOpenAI(
+    model = "glm-4.5-airx",
+    base_url="https://open.bigmodel.cn/api/paas/v4/",
+    api_key=os.environ["ZHIPU_API_KEY"],
+    timeout=15,
+    max_retries=0,
+)
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
@@ -264,6 +276,102 @@ async def project_creator(
         "project_id": new_project.id,
     }
 
+def require_document_scope(
+    db: Session, project_id: int, doc_ids: list[int] | None
+) -> list[int] | None:
+    """项目鉴权后校验显式文档范围；任何无效 ID 都不能静默忽略。"""
+    if doc_ids is None:
+        return None
+    if not doc_ids:
+        raise HTTPException(status_code=422, detail="doc_ids 不能为空列表")
+
+    unique_ids = list(dict.fromkeys(doc_ids))
+    documents = db.execute(
+        select(Document.id, Document.status).where(
+            Document.project_id == project_id,
+            Document.id.in_(unique_ids),
+        )
+    ).all()
+    if len(documents) != len(unique_ids):
+        raise HTTPException(status_code=404, detail="指定文档不存在或不属于当前项目")
+    if any(document.status != "completed" for document in documents):
+        raise HTTPException(status_code=409, detail="指定文档尚未完成处理，请检查文档状态")
+    return unique_ids
+
+def translate_query(query: str) -> str | None:
+    translated_query = None
+
+    #对问题进行翻译 中英文一起检索
+    translation_message = [
+        SystemMessage(
+            content=(
+                "你是一个专业的问题翻译助手。\n\n"
+                "任务：\n"
+                "- 如果输入问题主要为中文，将其翻译成英文。\n"
+                "- 如果输入问题主要为英文，将其翻译成中文。\n\n"
+                "要求：\n"
+                "1. 准确保留原问题的语义，不得增加、删除或猜测任何信息。\n"
+                "2. 专业术语必须使用对应领域中标准、常用的专业译法。\n"
+                "3. 产品名、型号、缩写、代码、专有名词等，如果没有必要，不要翻译或改写。\n"
+                "4. 不要回答用户的问题，只进行翻译。\n"
+                "5. 不要解释翻译过程，不要添加任何说明、前缀或后缀。\n"
+                "6. 保持原问题的检索意图，避免为了语言自然度而改变关键词含义。\n"
+                "7. 如果某个术语存在歧义且无法根据原文确定，不要自行猜测，尽可能保留原术语。\n\n"
+                "必须严格返回合法 JSON，不要使用 Markdown 代码块，也不要输出其他内容。\n"
+                '翻译失败时，将 translation 字段设为 JSON 的 null，不要返回字符串 "None"。\n'
+                "返回格式如下：\n"
+                "{\n"
+                '  "original": "原始问题",\n'
+                '  "translation": "翻译后的问题"\n'
+                "}"
+            )
+        ),
+        HumanMessage(
+            content=f"query={query}"
+        )
+    ]
+
+    # 翻译仅为辅助；调用、解析或字段校验失败都回退到原问题。
+    try:
+        response = translator.invoke(translation_message)
+        translation_results = json.loads(response.content)
+        if not isinstance(translation_results, dict):
+            raise ValueError("翻译结果必须是 JSON 对象")
+        translation = translation_results["translation"]
+        if translation is not None:
+            if not isinstance(translation, str):
+                raise ValueError("translation 必须是字符串或 null")
+            translation = translation.strip()
+            if not translation or translation.casefold() in {"none", "null"}:
+                raise ValueError("译文为空或无效")
+            translated_query = translation
+    except Exception as exc:
+        # 不将用户问题、模型原始输出或异常详情写入日志。
+        logger.warning("event=query_translation_failed error_type=%s", type(exc).__name__)
+        translated_query = None
+
+    return translated_query
+
+
+def retrieve_documents(
+        query: str,
+        project_id: int,
+        db: Session,
+        candidate_k_percentage: float,
+        doc_ids: list[int] | None
+):
+    #向量检索结果
+    results_vector = search_vector(
+        query, project_id, db, candidate_k_percentage, doc_ids=doc_ids
+    )
+
+    #存关键词检索结果
+    results_BM25 = search_bm25(
+        query, project_id, db, candidate_k_percentage, doc_ids=doc_ids
+    )
+
+    return results_vector,results_BM25
+
 @router.post("/projects/{project_id}/ask")
 def user_asking(
     project_id: int,
@@ -277,6 +385,7 @@ def user_asking(
     # 通过后继续调用你原有的检索与回答函数。
     require_project(db, project_id, user)
 
+    doc_ids = require_document_scope(db, project_id, request.doc_ids)
     selection = None
     if request.document_id is not None:
         document = db.get(Document, request.document_id)
@@ -299,16 +408,25 @@ def user_asking(
             f"当前选中的原文（待分析资料）：\n{request.selected_text}"
         )
     search_query = rewrite_query(retrieval_input, history, summary=summary)
+    translated_query = translate_query(search_query)
     if request.document_id is not None:
         final_chunks = search_document_first(
-            search_query, project_id, request.document_id, db, request.candidate_k,
+            search_query, project_id, request.document_id, db, request.candidate_k_percentage,
+            doc_ids=doc_ids, translated_query=translated_query,
         )
     else:
-        # 普通问答保持原来的全项目混合检索流程。
-        results_vector = search_vector(search_query, project_id, db, request.candidate_k)
-        results_BM25 = search_bm25(search_query, project_id, db, request.candidate_k)
+        # 原文和译文共享已校验的检索范围；翻译失败时只用原文。
+        results_vector, results_BM25 = [], []
+        for query in (search_query, translated_query):
+            if query is None:
+                continue
+            vector, bm25 = retrieve_documents(
+                query, project_id, db, request.candidate_k_percentage, doc_ids,
+            )
+            results_vector.extend(vector)
+            results_BM25.extend(bm25)
         merged = rrf_fuse(results_vector, results_BM25)
-        final_chunks = rerank_results(search_query, merged)
+        final_chunks = rerank_results(search_query, translated_query, merged)
 
     #生成回答
     final_result = generate_answer(

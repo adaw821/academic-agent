@@ -37,6 +37,8 @@ agent/
 **/agent/
 .venv/
 .venv-ragas/
+frontend/node_modules/
+frontend/dist/
 __pycache__/
 *.pyc
 *.pyo

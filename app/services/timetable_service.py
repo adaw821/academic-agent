@@ -1,3 +1,4 @@
+import httpx
 import base64
 import json
 import logging
@@ -30,69 +31,71 @@ class TimetableParseError(ValueError):
 class TimetableProviderError(RuntimeError):
     """The upstream vision service failed."""
 
+LAYOUT_PARSING_URL = "https://open.bigmodel.cn/api/paas/v4/layout_parsing"
 
 llm = ChatOpenAI(
-    model="glm-4.6v",
+    model="glm-4.5-flash",
     base_url="https://open.bigmodel.cn/api/paas/v4/",
     api_key=os.environ["ZHIPU_API_KEY"]
 )
 
-TEXT="""
+TEXT = """
+你是一个课程表信息提取助手。下面会给你一段由 OCR 从课表图片转录的 Markdown 文本。
+请只依据这段文本，提取其中出现的全部上课安排，并返回一个 JSON 数组。数组中的每个对象表示一次独立的上课安排。
 
-你是一个课程表图片解析助手。你需要从收到的课程表图片中提取全部课程信息。
+每个对象必须且只能包含以下八个字段：
 
-必须返回一个 JSON 数组，数组中的每个对象表示一次独立的上课安排，并且必须保留以下全部字段：
+- course_name：课程名称，严格保留文本中的原始内容和大小写。
 
-- course_name：课程名称，严格保留图片中的原始内容，尤其是字母大小写。
-- course_code：课程编号。
+- course_code：课程编号；文本中没有则为 null。
+
 - location：上课教室或地点。
+
 - day_of_week：上课星期，只能是 "Mon"、"Tue"、"Wed"、"Thu"、"Fri"、"Sat"、"Sun" 之一。
-- start_time：开始时间，必须使用 24 小时制的 "HH:MM" 格式。
-- end_time：结束时间，必须使用 24 小时制的 "HH:MM" 格式。
-- teachers：任课教师。
-- units：课程学分，必须是数字。
 
-1. 只返回 JSON 数组本身,不要任何多余文字,不要解释,不要用代码块(```)包裹。
-2. day_of_week 只能返回 "Mon"、"Tue"、"Wed"、"Thu"、"Fri"、"Sat"、"Sun" 之一，不得返回中文或数字。
-3. 同一门课如果在不同的天上课,每一天单独拆成一条记录。
-4. 同一课程在同一天、同一地点并且时间连续时，合并为一条记录，start_time 取最早时间，end_time 取最晚时间。时间不连续或上课地点不同时，必须分别返回独立对象。
-5. 禁止猜测图片中不存在或无法确认的信息。任何无法识别的字段都必须保留，并将值设为 null。units 必须是数字；无法识别时为 null，不得返回数字字符串。
-6. 先从 Mon 到 Sun 逐列扫描上方课表中的所有非空单元格，不得遗漏任何课程。
-7. 再读取图片下方的 Sections 表，获得每门课程的 course_code、teachers 和 units，并与上方课表逐门核对。确保 Sections 表中出现的每门课程都至少有一条上课安排。
-8. 输出 JSON 前再次核对每个星期和每门课程；如果发现遗漏，按照以上规则补充后再输出。
+- start_time：开始时间，24 小时制 "HH:MM" 格式。
 
-9.字段名校验规则：
+- end_time：结束时间，24 小时制 "HH:MM" 格式。
 
-1. 每个对象必须且只能包含以下八个字段：
-   "course_name"、"course_code"、"location"、"day_of_week"、
-   "start_time"、"end_time"、"teachers"、"units"。
+- teachers：任课教师；文本中没有则为 null。
 
-2. 输出前必须逐个检查字段名，并把含义相同但拼写不同的字段统一为上述标准字段。例如：
-   - teacher、teacher_name、instructor → teachers
-   - courseName、course_title → course_name
-   - courseCode、code → course_code
-   - room、classroom、locate → location
+- units：学分，必须是数字；无法确认时为 null，不得返回数字字符串。
 
-3. 不允许在最终结果中保留标准字段以外的任何字段。
+提取规则：
 
-4. 如果无法判断某个非标准字段对应哪个标准字段，不要猜测或保留该字段；使用正确的标准字段名，并将值设为 null。
+1. 只返回 JSON 数组本身，不要任何解释、前后缀文字或代码块（```）。
 
-5. 输出最终 JSON 前，再次确认每个对象的字段名与上述八个字段完全一致，不得缺少、增加或修改字段名
+2. 文本可能是两种形式之一，或两者同时出现：
+   - 网格时间表：按星期分列、按时间段分行，课程单元格里写有课程名和教室。
+   - Sections 表：包含 Course Code、Name、Teachers、Time、Room、Units 等列。
+   两种形式同时出现时，以网格时间表确定星期与起止时间，以 Sections 表补齐 course_code、teachers、units。
+
+3. 同一门课在不同天上课，每一天拆成一条独立记录。
+
+4. 同一课程在同一天、同一地点且时间段连续时，合并为一条，start_time 取最早、end_time 取最晚；时间不连续或地点不同时分别成条。
+
+5. 逐条扫描 Mon 到 Sun，以及 Sections 表中的每一行，不得遗漏。
+
+6. 【最重要】严禁使用文本以外的任何信息，严禁推测、补全或凭常识编造。
+   字段在文本中没有明确出现时，一律设为 null。例如时间表网格中没有教师姓名，则 teachers 必须为 null。
+
+7. 含义相同但写法不同的字段名统一为标准字段：teacher/instructor → teachers；courseName/course_title → course_name；courseCode/code → course_code；room/classroom → location。
+
+8. 输出前逐个核对：字段名与上述八个完全一致，无缺漏、无多余字段；day_of_week 合法；时间为 "HH:MM"；units 为数字或 null。
 
 示例输出：
 [
   {
     "course_name": "Machine Learning",
     "course_code": "COMP2073",
-    "location": "t8-209",
+    "location": "T8-209",
     "day_of_week": "Mon",
     "start_time": "19:00",
     "end_time": "21:00",
-    "teachers": "Ms.Angela",
+    "teachers": "Ms. Angela",
     "units": 3.0
   }
-]   
-
+]
 """
 
 EXPECTED_ATTRIBUTES = {
@@ -112,6 +115,31 @@ NECESSARY_ATTRIBUTES = [
     "start_time",
     "end_time",
 ]
+
+async def ocr_image(content: bytes, content_type: str) -> str:
+    """调用 GLM-OCR，把图片转录为 Markdown 文本。"""
+    validate_image(content, content_type)
+    processed_content = base64.b64encode(content).decode("utf-8")
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                LAYOUT_PARSING_URL,
+                headers={
+                    "Authorization": f"Bearer {os.environ['ZHIPU_API_KEY']}"
+                },
+                json={
+                    "model": "glm-ocr",
+                    "file": f"data:{content_type};base64,{processed_content}",
+                },
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        logger.exception("GLM-OCR request failed")
+        raise TimetableProviderError(
+            "课表识别服务暂时不可用，请稍后重试"
+        ) from exc
+    #返回一个md 传给llm解析出json
+    return response.json()["md_results"]
 
 async def timetable_service(content: bytes, db: Session, content_type: str, user_id: int):
     complete, timetables = await content_parse(content, content_type)
@@ -243,18 +271,15 @@ def validate_image(content: bytes, content_type: str):
 
 async def content_parse(content: bytes, content_type: str):
     """图片解析；输入、识别和上游调用错误分别处理。"""
-    validate_image(content, content_type)
-    processed_content = base64.b64encode(content).decode("utf-8")
+    ocr_markdown = await ocr_image(content, content_type)
     message = HumanMessage(
-        content=[
+        content=(
             {"type": "text", "text": TEXT},
             {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{content_type};base64,{processed_content}",
-                },
+             "type" : "text" ,
+             "text" : ( "以下是课表图片的OCR转录结果，" f"请严格依据其中的内容提取：\n {ocr_markdown} " ),
             },
-        ]
+    )
     )
     try:
         response = await llm.ainvoke([message])
@@ -262,7 +287,7 @@ async def content_parse(content: bytes, content_type: str):
         logger.exception("Timetable vision service request failed")
         raise TimetableProviderError("课表识别服务暂时不可用，请稍后重试") from exc
 
-    retry_message = "未能识别出有效课表，请上传包含课程名称、地点和上课时间的清晰图片"
+    retry_message = "未能从md文本中识别出药效信息，请上传包含课程名称、地点和上课时间的清晰图片"
     response_content = response.content
     if not isinstance(response_content, str) or not response_content.strip():
         raise TimetableParseError(retry_message)
