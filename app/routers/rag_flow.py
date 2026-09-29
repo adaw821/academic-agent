@@ -1,5 +1,6 @@
 from pathlib import Path
 from uuid import uuid4
+import json
 import logging
 from time import perf_counter
 
@@ -14,7 +15,7 @@ from app.models.projects import Project
 from app.schemas.project_create import ProjectCreate
 from app.models.users import User
 from app.schemas.search import SearchRequest
-from app.services.search_services import search_vector, search_bm25, rrf_fuse, rerank_results, history_messages_control, rewrite_query
+from app.services.search_services import search_vector, search_bm25, rrf_fuse, rerank_results, history_messages_control, rewrite_query, search_document_first
 from app.services.answer_services import generate_answer, get_history_messages
 from app.services.user_services import get_currentUser
 
@@ -276,27 +277,52 @@ def user_asking(
     # 通过后继续调用你原有的检索与回答函数。
     require_project(db, project_id, user)
 
+    selection = None
+    if request.document_id is not None:
+        document = db.get(Document, request.document_id)
+        if document is None or document.project_id != project_id:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        if document.status != "completed":
+            raise HTTPException(status_code=409, detail="文档尚未处理完成，暂不能进行问答")
+        selection = {
+            "document_id": document.id,
+            "filename": document.filename,
+            "selected_text": request.selected_text,
+        }
+
     #检索前校验会话并读取一次历史，供问题改写和最终回答共用。
     history, summary, summary_boundary = get_history_messages(request.conversation_id, db, project_id)
-    search_query = rewrite_query(request.query, history, summary=summary)
-    #存向量检索结果
-    results_vector = search_vector(search_query, project_id, db, request.candidate_k)
-
-    #存关键词检索结果
-    results_BM25 = search_bm25(search_query, project_id, db, request.candidate_k)
-
-    #rrf排序
-    merged=rrf_fuse(results_vector, results_BM25)
-    #最终得到的片
-    final_chunks = rerank_results(search_query, merged)
+    retrieval_input = request.query
+    if request.document_id is not None:
+        retrieval_input = (
+            f"用户问题：\n{request.query}\n\n"
+            f"当前选中的原文（待分析资料）：\n{request.selected_text}"
+        )
+    search_query = rewrite_query(retrieval_input, history, summary=summary)
+    if request.document_id is not None:
+        final_chunks = search_document_first(
+            search_query, project_id, request.document_id, db, request.candidate_k,
+        )
+    else:
+        # 普通问答保持原来的全项目混合检索流程。
+        results_vector = search_vector(search_query, project_id, db, request.candidate_k)
+        results_BM25 = search_bm25(search_query, project_id, db, request.candidate_k)
+        merged = rrf_fuse(results_vector, results_BM25)
+        final_chunks = rerank_results(search_query, merged)
 
     #生成回答
     final_result = generate_answer(
         request.query, final_chunks, history, request.conversation_id, db, project_id,
         summary=summary,
         summary_boundary=summary_boundary,
+        selection=selection,
     )
-    #保存对话历史
-    conversation_id = history_messages_control(final_result["answer"], request.query, request.conversation_id, db, project_id)
+    # 保留原问题和选区，不用改写后的检索问题覆盖用户原意；复用现有消息表。
+    history_query = request.query
+    if selection is not None:
+        history_query = json.dumps({"query": request.query, "selection": selection}, ensure_ascii=False)
+    conversation_id = history_messages_control(final_result["answer"], history_query, request.conversation_id, db, project_id)
     final_result["conversation_id"] = conversation_id
+    if selection is not None:
+        final_result["selection"] = selection
     return final_result

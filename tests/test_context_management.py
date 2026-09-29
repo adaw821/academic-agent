@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import sys
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -31,6 +30,7 @@ with patch.dict(os.environ, {
     from app.services import search_services as search
 
 from fastapi import HTTPException
+from app.schemas.search import SearchRequest
 from langchain_core.messages import AIMessage
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import sessionmaker
@@ -89,7 +89,7 @@ class ContextTests(unittest.TestCase):
 
     def test_new_conversation_and_route_save(self):
         self.assertEqual(answers.get_history_messages(None, self.db, 1), ([], "", None))
-        request = SimpleNamespace(query="question", conversation_id=None, candidate_k=5)
+        request = SearchRequest(query="question", conversation_id=None, candidate_k=5)
         with patch.object(search, "llm", model()) as rewrite, patch.object(answers, "llm", model()), \
              patch.object(answers, "count_message_tokens", return_value=100), \
              patch.object(rag_flow, "search_vector", return_value=[]), \
@@ -277,7 +277,7 @@ class ContextTests(unittest.TestCase):
     def test_failed_answer_never_saves_turn(self):
         for content, finish in [("partial", "length"), ("", "stop"), ([], "stop")]:
             with self.subTest(content=content, finish=finish):
-                request = SimpleNamespace(query="question", conversation_id=1, candidate_k=5)
+                request = SearchRequest(query="question", conversation_id=1, candidate_k=5)
                 with patch.object(answers, "llm", model(content, finish)), \
                      patch.object(answers, "count_message_tokens", return_value=100), \
                      patch.object(rag_flow, "search_vector", return_value=[]), \
