@@ -30,6 +30,8 @@ py -3.13 -m venv .venv
 
 如果固定版本无法下载，保留完整报错并核对软件源与 Python 版本，不要随意换成一组未经验证的新版本。
 
+本轮增加 `rank-bm25`、`jieba`，老环境也要重新安装 `requirements.txt`。这两个依赖目前未锁版本；安装完成后执行 `.\.venv\Scripts\python.exe -m pip freeze > backend-environment.txt`，随测试报告保存实际版本。
+
 ## 3. PostgreSQL 与 pgvector：任选一种方式
 
 `pip install pgvector` 只安装 Python 集成库，**不会安装 PostgreSQL 服务，也不会安装数据库端扩展**。每个测试数据库都必须启用 `vector` 扩展。参见 [pgvector 官方安装说明](https://github.com/pgvector/pgvector#installation)。
@@ -91,7 +93,7 @@ macOS/Linux 使用 `export DATABASE_URL='...'` 和 `export ZHIPU_API_KEY='...'`�
 
 当前问答模型在 `app/services/answer_services.py` 中写为 `glm-5.3`，课表模型在 `app/services/timetable_service.py` 中写为 `glm-4.6v`。这些是当前源码值，不保证测试账号均有调用权限；请使用有相应权限的密钥。当前代码没有读取 `ZHIPU_CHAT_MODEL` 环境变量，设置它不会改变模型。
 
-## 5. 初始化表和测试用户
+## 5. 初始化数据库表
 
 必须先完成上一节的数据库端扩展启用，再运行：
 
@@ -102,15 +104,7 @@ macOS/Linux 使用 `export DATABASE_URL='...'` 和 `export ZHIPU_API_KEY='...'`�
 
 当前迁移包含 `vector(1024)` 列，但没有自动创建扩展。只运行迁移而不启用扩展，会出现 `type vector does not exist`。
 
-用数据库客户端连接 academic_agent 后执行以下 SQL（Docker 用户也可以先运行 `docker exec -it academic-agent-test-db psql -U postgres -d academic_agent`）：
-
-```sql
-INSERT INTO users (username, email, phone, password_hash)
-VALUES ('rag_tester', 'rag_tester@example.com', NULL, 'test-only')
-RETURNING id;
-```
-
-记录返回的 ID，用于创建项目。只需创建一次；重复执行会触发邮箱唯一约束。该用户仅用于接口测试，密码字段不是可登录的真实密码哈希。项目目前没有创建用户的 HTTP 路由。
+当前已提供注册和登录 HTTP 接口，并通过 `user_sessions` 表校验登录状态。确认拿到了相应模型、路由和迁移文件，迁移已升级到交付版本的 head。不要用 SQL 插入 `password_hash='test-only'` 的用户：它没有有效密码哈希，无法正常登录；旧测试库有这种用户时，另注册一个测试账号。
 
 ## 6. 启动和检查
 
@@ -118,9 +112,11 @@ RETURNING id;
 .\.venv\Scripts\python.exe -m uvicorn main:app --reload
 ```
 
-打开 [Swagger](http://127.0.0.1:8000/docs)，依次创建项目、上传文档、查询状态、提问。上传返回 **202**，等状态变成 `completed` 后再做内容测试；具体请求见 [问答功能测试指南](问答功能测试指南.md)。
+打开 [Swagger](http://127.0.0.1:8000/docs)，依次注册、登录、确认当前用户、创建项目、上传文档、查询状态、提问。使用 `POST /api/user/create` 注册（邮箱或手机号至少填写一个），使用 `POST /api/user/login` 登录，账号字段 `account` 填邮箱或手机号。登录返回 `session_id` Cookie；后续项目/文档/问答请求必须携带 Cookie。统一使用 `127.0.0.1`，不要混用 `localhost`，并用 `GET /api/user/me` 确认会话有效。当前会话有效期为 30 分钟，过期重新登录。
 
-首次上传或问答会加载/下载 `BAAI/bge-m3`；非 TXT 文件解析还可能触发 Docling 模型下载，需要可访问相关模型源并留出数 GB 磁盘空间。模型首次加载明显慢于后续请求。GPU 不是本轮运行的必需条件，CPU 耗时取决于机器和文档规模。
+上传返回 **202**，等状态变成 `completed` 后再做内容测试；具体请求见 [问答功能测试指南](问答功能测试指南.md)。创建项目不再需要传 `user_id`，归属由登录用户确定。
+
+首次上传或问答会加载/下载向量模型 `BAAI/bge-m3`；首次有候选的问答还会加载/下载重排模型 `BAAI/bge-reranker-v2-m3`，二者是独立模型。非 TXT 文件解析还可能触发 Docling 模型下载，需要可访问相关模型源并留出数 GB 磁盘空间。记录下载/首次加载与后续请求耗时；不要把下载等待计入稳定推理延迟。GPU 不是运行的必需条件，CPU 耗时取决于机器、候选数量和输入长度；记录 GPU/CPU、内存及模型加载错误。
 
 上传文件写入项目下的 `data/uploads`。后台任务在当前服务进程中执行；处理中不要改代码触发 reload，也不要关闭服务。正式性能测试去掉 `--reload`。
 
@@ -150,6 +146,10 @@ py -3.13 -m venv .venv-ragas
 | `type vector does not exist` | 是否在当前连接的数据库启用了扩展 |
 | 模型调用 401/403 或模型不可用 | API 密钥、余额、账号权限及源码中的模型名 |
 | 文档一直 queued/processing 或 failed | 查 Uvicorn 日志、模型下载状态，确认进程没有重启 |
-| 问答提示没有资料 | 项目 ID 是否正确，文档是否已经 completed |
+| 项目/问答接口 HTTP 401 | 是否已登录并保留 `session_id` Cookie；会话是否过期 |
+| 项目接口 HTTP 403 | 项目是否属于当前登录用户 |
+| `ModuleNotFoundError: jieba` / `rank_bm25` | 用运行服务的同一个解释器重新安装 requirements.txt |
+| `'user' is an invalid keyword argument for Document` | 确认交付代码已删除 Document 构造中的 `user=user` 并重启服务 |
+| 问答提示没有资料 | 核对项目和 completed 状态；也可能候选被重排阈值全部过滤，不能直接断定库里没有答案 |
 
 交付测试报告时记录 Python、PostgreSQL、pgvector 扩展版本、代码提交编号、依赖清单和模型名称。
