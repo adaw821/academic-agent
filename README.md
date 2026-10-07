@@ -31,12 +31,24 @@ npm run dev
 本文主要测试后两个接口。文档处理流程如下：
 
 ```text
-TXT 直接按 UTF-8 读取；PDF/DOCX/PPTX 经 Docling 解析为 Markdown
-  -> 父分片（2000 字符，重叠 80）
-  -> 子分片（TXT：450 字符，重叠 50；其他：150 字符，重叠 30）
+TXT 直接按 UTF-8 读取；PDF 使用 Docling 结构化结果；DOCX/PPTX 经 Docling 解析为 Markdown
+  -> 父分片（PDF：按小节，可跨页，最多 4000 字符含标题路径；PPTX：每页一个；其他：2000 字符，重叠 80）
+  -> 子分片（PDF/PPTX：父片内按内容块合并，最多 800 字符含标题、无重叠；TXT：450 字符，重叠 50；其他：300 字符，重叠 30）
   -> BAAI/bge-m3 生成 1024 维向量
   -> PostgreSQL + pgvector
 ```
+
+PDF 父片和每个子片携带完整标题路径（例如 `数据库 > 索引 > 联合索引`）。小节在下一个标题处结束，换页不结束；超过 4000 字符时优先沿内容块拆父片，这些父片共享文档内的 `section_id`。同名但位置不同的小节使用不同 ID。没有章节归属的正文按页兜底；父片和子片保留 Docling 内容项的来源页码。PPTX 继续按页切分，并重复较短的页首标题。二者跳过空白、纯标题和仅含图片占位符的内容。
+
+标题层级以 Docling 识别结果为准；如完整标题路径本身已占满子片预算，上传会明确报错。正文项跨页时保留该项的所有来源页码。问答 `sources` 新增 `section_id`、`heading_path`、`page_numbers`（父片正文页码）和 `child_page_numbers`（命中子片正文页码），旧文档这些字段为空。检索仍按子片评分、按父片去重，不自动展开整个章节。
+
+升级已有数据库后再启动新代码：`python -m alembic upgrade head`。新分片规则适用于后续上传；已有文档需要重新上传才能使用。
+
+PDF/PPT 上传解析后还会提取 Docling 的图片节点，写入原上传文件旁的 `<文件存储名>.images/`，其中包含 PNG 和 `manifest.json`。入口为 `app/services/image_extraction.py` 的 `extract_document_images(document, document_id, output_dir)`，返回图片记录列表；无需新增数据库迁移。
+
+每条记录包含 `image_id`、`source_ref`（Docling 节点引用）、`page_no`、`bbox`、`reading_order` 和相对输出目录的 `image_path`。`reading_order` 是遍历所有正文内容项（含图片子节点）的零起始序号，不是图片序号，也不是视觉模型校正后的顺序。坐标保留 Docling 的 `coord_origin`；`provenance` 保存全部来源位置及页面尺寸，顶层页码/坐标取第一个来源。`status=unavailable` 表示节点缺少可用像素或读取失败，不会伪造图片路径。后续识别只消费 `status=saved` 的记录。
+
+本步骤仅提取解析出的图片节点，不会把所有页面渲染成图片，也不保证覆盖未被 Docling 检出的图形。Docling 自带 PDF OCR 已关闭，仍提取 PDF 文字层并保存图片，图片计划统一交给视觉模型；尚未接入图片识别、分片关联或前端展示。纯图片文档可能仍因缺少可检索正文而处理失败，但已提取图片会保留，供后续识别使用。日志事件 `document_images_extracted` 记录数量和提取耗时。
 
 ## 2. 环境要求
 
@@ -257,23 +269,28 @@ POST http://127.0.0.1:8000/api/projects/{project_id}/documents
 
 ### 11.3 查看和保存性能日志
 
-埋点日志默认输出到运行 Uvicorn 的终端。正式测速时不要使用 `--reload`，避免文件监控和自动重启影响结果。
-
-Windows PowerShell：
+性能埋点自动以 UTF-8 追加到项目根目录的 `logs/performance.log`，不需要重定向终端。目录自动创建，已加入 Git 忽略规则。直接启动即可：
 
 ```powershell
-New-Item -ItemType Directory -Force test_files\logs
-uvicorn main:app --host 127.0.0.1 --port 8000 2>&1 | Tee-Object -FilePath test_files\logs\performance.log
+uvicorn main:app --host 127.0.0.1 --port 8000
+# 在另一个终端实时查看
+Get-Content logs/performance.log -Wait -Tail 50
 ```
 
-macOS/Linux：
+可在启动前设置环境变量 `PERFORMANCE_LOG_FILE` 自定义文件位置；相对路径按项目根目录解析。普通运行日志与异常堆栈仍输出到终端。正式测速建议关闭 `--reload`。
 
-```bash
-mkdir -p test_files/logs
-uvicorn main:app --host 127.0.0.1 --port 8000 2>&1 | tee test_files/logs/performance.log
-```
+每个阶段产生 `pipeline_stage_started` 和 `pipeline_stage_finished`，完成记录包含 `stage`、`elapsed_ms`（毫秒）、`status`、`error_type`。`trace_id` 关联一次调用，`span_id` / `parent_span_id` 区分嵌套及重复阶段；同时记录时间、进程 ID 和可用的项目/文档 ID。上传和后台处理各有独立 trace，可通过文档 ID 关联后台记录。阶段为包含子阶段的墙钟耗时，不能直接相加；跳过的阶段不会产生记录，缓存模型仅首次加载计时。
 
-日志保存在已被 Git 忽略的 `test_files/logs` 中，不应提交原始测试文档或日志。
+| 阶段 | 内容 |
+| --- | --- |
+| `upload.total` / `upload.file_read` / `upload.file_save` / `upload.db_flush` / `upload.commit` | 上传总耗时、读文件、落盘、写入记录、提交 |
+| `document.process` / `document.pipeline` / `document.file_read` / `document.processing_commit` / `document.final_commit` | 后台调用、处理流程、文件读取、状态提交、分片最终提交 |
+| `chunk.*` / `image.*` | 文档转换、图片提取及识别、父子分片、向量化和数据库写入（按实际执行阶段记录） |
+| `qa.total` / `qa.history_load` / `qa.query_rewrite` / `qa.translate` | 问答总耗时、历史读取、问题改写、翻译 |
+| `qa.retrieve` / `qa.vector_search` / `qa.query_embedding` / `qa.bm25_search` / `qa.rrf_fuse` / `qa.rerank` | 检索、问题向量化、关键词检索、融合、重排 |
+| `qa.answer` / `qa.answer_llm` / `qa.history_save` | 回答准备与生成、回答模型调用、历史保存 |
+
+失败阶段仍记录耗时和异常类型，不写入问题、文档正文或模型响应。后台异常由原有逻辑处理，因此以 `document.pipeline` 的状态判断处理是否成功；`document.process` 包含失败恢复逻辑。日志持续追加，不自动轮转，可在服务停止后按需归档。
 
 一次成功上传会产生以下几类关键事件：
 
@@ -295,7 +312,7 @@ event=document_upload_failed project_id=... total_ms=...
     saved_count=... failed_count=...
 ```
 
-该日志之后会跟随 Python 异常堆栈，请将堆栈一并保存。日志不会主动记录文档正文、向量、数据库密码或 API 密钥。
+上述失败事件与 Python 异常堆栈仍在终端，统一性能文件中可查对应失败阶段。日志不会主动记录文档正文、向量、数据库密码或 API 密钥。
 
 ### 11.4 日志字段含义
 
@@ -315,7 +332,7 @@ event=document_upload_failed project_id=... total_ms=...
 | `parent_count` / `child_count` | 实际创建的父、子分片数 | 用于计算吞吐量和排查分片异常 |
 | `saved_count` / `failed_count` | 本次请求成功和被拒绝的文件数 | 应与接口响应一致 |
 
-注意：`document_chunked.total_ms` 不包含后台最终事务提交，也不包含排队时间；当前后台提交耗时没有单独记录。首次 Docling 转换也可能触发延迟初始化，因此第一次 `parse_ms` 通常不能代表稳定速度。后台失败看 `document_processing_failed` 日志和文档状态，HTTP 202 本身不代表解析成功。
+注意：`document_chunked.total_ms` 不包含后台最终事务提交，也不包含排队时间；后台最终提交耗时见 `document.final_commit`。首次 Docling 转换也可能触发延迟初始化，因此第一次 `parse_ms` 通常不能代表稳定速度。后台失败看 `document_processing_failed` 日志和文档状态，HTTP 202 本身不代表解析成功。
 
 ### 11.5 性能测试方法
 

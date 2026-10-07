@@ -57,3 +57,6 @@ uploads/
 
 # Local API test files
 test_files/
+
+# Performance telemetry
+/logs/

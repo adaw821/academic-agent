@@ -1,3 +1,4 @@
+from app.services.performance import measure_stage, timed_stage, logger as performance_logger
 from app.services.chunk import get_embedding_model
 
 from sqlalchemy.orm import Session
@@ -43,6 +44,7 @@ def tokenize_for_bm25(text: str) -> list[str]:
         if (token := word.strip()) and re.search(r"\w", token)
     ]
 
+@timed_stage("qa.query_embedding")
 def embedding_query(query):
     """将问题转换成向量"""
     model =  get_embedding_model()
@@ -56,6 +58,7 @@ def embedding_query(query):
 
     return vector.tolist()
 
+@timed_stage("qa.query_rewrite")
 def rewrite_query(
     query: str,
     histories: list[dict],
@@ -121,6 +124,7 @@ def percentage_candidate_count(total_chunks: int, percentage: float) -> int:
 
 
 #向量召回
+@timed_stage("qa.vector_search")
 def search_vector(
         query: str,
         project_id: int,
@@ -183,6 +187,10 @@ def search_vector(
             "parent_id": parent.id,
             "child_content": child.content,
             "parent_content": parent.content,
+            "section_id": parent.section_id,
+            "heading_path": parent.heading_path,
+            "page_numbers": parent.page_numbers,
+            "child_page_numbers": child.page_numbers,
             "document_id": document.id,
             "filename": document.filename,
             "distance": float(distance_value),
@@ -191,6 +199,7 @@ def search_vector(
     return results
 
 #关键词召回
+@timed_stage("qa.bm25_search")
 def search_bm25(
     query: str,
     project_id: int,
@@ -212,6 +221,10 @@ def search_bm25(
         Child.parent_id.label("parent_id"),
         Child.content.label("child_content"),
         Parent.content.label("parent_content"),
+        Parent.section_id.label("section_id"),
+        Parent.heading_path.label("heading_path"),
+        Parent.page_numbers.label("page_numbers"),
+        Child.page_numbers.label("child_page_numbers"),
         Document.id.label("document_id"),
         Document.filename.label("filename"),
     )
@@ -278,6 +291,7 @@ def search_bm25(
     return results
 
 #做rrf排序
+@timed_stage("qa.rrf_fuse")
 def rrf_fuse(
         vector_results: list[dict],
         BM25_results: list[dict]
@@ -307,16 +321,19 @@ def rrf_fuse(
 
     return merged
 
+@timed_stage("qa.rerank")
 def rerank_results(
     original_query: str,
     translated_query: str | None,
     merged_results: list[dict],
 ) -> list[dict]:
-    """对子片做双查询评分，再取各父片的最高子片分数并返回父片正文。"""
+    """对子片做双查询评分，按最高子片分选择父片并返回完整父片正文。"""
     if not merged_results:
+        performance_logger.info("event=rerank_input merged_count=0 child_count=0 pair_count=0")
+        performance_logger.info("event=rerank_output parent_count=0 fallback=false")
         return []
 
-    # 同一子片只评分一次；同一父片下的不同子片都要参与评分。
+    # 同一子片只评分一次；同一父片下的不同子片都参与评分。
     children = []
     seen_child_ids = set()
 
@@ -329,7 +346,22 @@ def rerank_results(
         seen_child_ids.add(child_id)
         children.append(item.copy())
 
-    # 两种查询针对同一组、同一顺序的子片正文评分。
+    lengths = [len(item["child_content"]) for item in children]
+    performance_logger.info(
+        "event=rerank_input merged_count=%s child_count=%s pair_count=%s "
+        "original_query_chars=%s translated_query_chars=%s "
+        "total_child_chars=%s max_child_chars=%s avg_child_chars=%.2f batch_size=4",
+        len(merged_results), len(children), len(children) * (2 if translated_query else 1),
+        len(original_query), len(translated_query or ""),
+        sum(lengths), max(lengths), sum(lengths) / len(lengths),
+    )
+    for index, item in enumerate(children):
+        performance_logger.info(
+            "event=rerank_input_item index=%s child_id=%s parent_id=%s child_chars=%s",
+            index, item["child_id"], item["parent_id"], lengths[index],
+        )
+
+    # 两种查询针对同一组、同一顺序的子片正文评分，不能跨子片拼分。
     original_pairs = []
     for item in children:
         original_pairs.append([
@@ -339,10 +371,11 @@ def rerank_results(
 
     model = get_reranker()
 
-    original_scores = model.predict(
-        original_pairs,
-        batch_size=4,
-        activation_fn=Sigmoid(),
+    with measure_stage("qa.rerank_predict_original", pair_count=len(original_pairs)):
+        original_scores = model.predict(
+            original_pairs,
+            batch_size=4,
+            activation_fn=Sigmoid(),
         )
 
     translated_scores = None
@@ -350,18 +383,18 @@ def rerank_results(
         translated_pairs = [
             [translated_query, item["child_content"]] for item in children
         ]
-        translated_scores = model.predict(
-            translated_pairs,
-            batch_size=4,
-            activation_fn=Sigmoid(),
-        )
+        with measure_stage("qa.rerank_predict_translated", pair_count=len(translated_pairs)):
+            translated_scores = model.predict(
+                translated_pairs,
+                batch_size=4,
+                activation_fn=Sigmoid(),
+            )
 
     if len(original_scores) != len(children):
         raise RuntimeError("原问题重排分数数量与子片数量不一致")
     if translated_scores is not None and len(translated_scores) != len(children):
         raise RuntimeError("译文重排分数数量与子片数量不一致")
 
-    best_by_parent = {}
     for index, item in enumerate(children, start=0):
         original_rerank_score = float(original_scores[index])
         item["original_rerank_score"]=original_rerank_score
@@ -371,34 +404,63 @@ def rerank_results(
             translated_rerank_score = None
         item["translated_rerank_score"] = translated_rerank_score
 
-        item["total_score"] = (
+        item["mean_score"] = (
             (original_rerank_score + translated_rerank_score) / 2
             if translated_rerank_score is not None
             else original_rerank_score
         )
-        # 先合并同一子片的两种评分，再取父片最高分，不能跨子片拼分。
-        # 保留得分最高子片的 ID、原始评分和完整父片正文，便于追溯。
-        parent_id = item["parent_id"]
-        previous = best_by_parent.get(parent_id)
-        if previous is None or item["total_score"] > previous["total_score"]:
-            best_by_parent[parent_id] = item
+        item["max_score"] = (
+            max(original_rerank_score, translated_rerank_score)
+            if translated_rerank_score is not None
+            else original_rerank_score
+        )
+        item["weighted_score"] = (
+            0.75 * item["max_score"] + 0.25 * min(original_rerank_score, translated_rerank_score)
+            if translated_rerank_score is not None
+            else original_rerank_score
+        )
+        item["total_score"] = item["weighted_score"]
+        item["score_mode"] = "weighted" if translated_rerank_score is not None else "original"
 
-    parents = sorted(
-        best_by_parent.values(), key=lambda item: item["total_score"], reverse=True
+    results = chunk_filter(children)
+    fallback = not results and translated_scores is not None
+    if fallback:
+        # 加权分全部未过线时，复用所有子片的两路分数，按最大值重新选父片。
+        fallback_children = [
+            {**item, "total_score": item["max_score"], "score_mode": "max_fallback"}
+            for item in children
+        ]
+        results = chunk_filter(fallback_children)
+    performance_logger.info(
+        "event=rerank_output scored_child_count=%s parent_count=%s fallback=%s",
+        len(children), len(results), str(fallback).lower(),
     )
-
-    return chunk_filter(parents)
+    for index, item in enumerate(results):
+        performance_logger.info(
+            "event=rerank_output_item index=%s child_id=%s parent_id=%s "
+            "child_chars=%s parent_chars=%s",
+            index, item["child_id"], item["parent_id"],
+            len(item["child_content"]), len(item.get("parent_content", "")),
+        )
+    return results
 
 #过滤
 def chunk_filter(
     parents: list[dict],
-    min_score: float=0.7,
+    min_score: float=0.3,
     top_k:int=5,
     ):
+    """按分数降序过滤，每个父片只保留最高分子片，名额按不同父片计算。"""
+    if not parents or top_k <= 0:
+        return []
+
+    ranked = sorted(parents, key=lambda parent: parent["total_score"], reverse=True)
     results = []
-    for parent in parents:
-        if parent["total_score"]>min_score:
+    seen_parent_ids = set()
+    for parent in ranked:
+        if parent["total_score"]>min_score and parent["parent_id"] not in seen_parent_ids:
             results.append(parent)
+            seen_parent_ids.add(parent["parent_id"])
         if len(results)==top_k:
             break
 
@@ -409,10 +471,12 @@ def chunk_filter(
 
 
 @lru_cache(maxsize=1)
+@timed_stage("qa.reranker_load")
 def get_reranker():
     return CrossEncoder("BAAI/bge-reranker-v2-m3")
 
 
+@timed_stage("qa.document_first_search")
 def search_document_first(
     query: str,
     project_id: int,
@@ -444,10 +508,11 @@ def search_document_first(
     # 只在通过重排阈值的父片中分配名额：当前文档优先 3 片，总计最多 5 片。
     primary = current[:3]
     supplements = others[:5 - len(primary)]
-    # 其他文档不足时，用当前文档剩余的合格父片补齐；输出仍将当前文档放前面。
+    # 其他文档不足时，用当前文档剩余父片补齐；输出仍将当前文档放前面。
     primary.extend(current[len(primary):5 - len(supplements)])
     return primary + supplements
 
+@timed_stage("qa.history_save")
 def history_messages_control(
     answer:str,
     query: str,

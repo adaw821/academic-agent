@@ -1,0 +1,27 @@
+{
+  "name": "academic-agent-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "playwright test"
+  },
+  "dependencies": {
+    "dompurify": "^3.2.0",
+    "lucide-vue-next": "^0.468.0",
+    "marked": "^15.0.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.0",
+    "@types/node": "^22.0.0",
+    "@vitejs/plugin-vue": "^5.2.0",
+    "prettier": "3.9.9",
+    "typescript": "~5.7.0",
+    "vite": "^6.1.0",
+    "vue-tsc": "^2.2.0"
+  }
+}

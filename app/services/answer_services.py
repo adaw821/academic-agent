@@ -1,3 +1,4 @@
+from app.services.performance import measure_stage, timed_stage, logger as performance_logger
 import os
 import json
 from langchain_openai import ChatOpenAI
@@ -22,6 +23,7 @@ llm = ChatOpenAI(
 )
 
 
+@timed_stage("qa.answer")
 def generate_answer(
         query: str,
         final_chunks: list[dict],
@@ -225,7 +227,8 @@ def generate_answer(
         )
     ]
 
-    response = llm.bind(max_tokens=RESERVED_OUTPUT_TOKENS).invoke(messages)
+    with measure_stage("qa.answer_llm"):
+        response = llm.bind(max_tokens=RESERVED_OUTPUT_TOKENS).invoke(messages)
     if response.response_metadata.get("finish_reason") == "length":
         raise HTTPException(status_code=502, detail="回答生成达到输出上限，本轮问答未保存，请缩小问题范围后重试。")
     if not isinstance(response.content, str) or not response.content.strip():
@@ -240,11 +243,16 @@ def generate_answer(
                 "document_id": item["document_id"],
                 "parent_id": item["parent_id"],
                 "filename": item["filename"],
+                "section_id": item.get("section_id"),
+                "heading_path": item.get("heading_path"),
+                "page_numbers": item.get("page_numbers"),
+                "child_page_numbers": item.get("child_page_numbers"),
             }
             for index, item in enumerate(final_chunks, start=1)
         ],
     }
 
+@timed_stage("qa.history_load")
 def get_history_messages(
     conversation_id: int | None,
     db: Session,

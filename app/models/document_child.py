@@ -1,10 +1,10 @@
-from sqlalchemy import ForeignKey, Integer, Text
+from sqlalchemy import ForeignKey, Integer, JSON, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 
 from app.db.database import Base
 class Child(Base):
-    """用来查找的小表"""
+    """子片表"""
     __tablename__ = "document_child"
 
     id: Mapped[int] = mapped_column(
@@ -26,6 +26,8 @@ class Child(Base):
         Integer,
         nullable=False
     )
+
+    page_numbers: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
 
     parent: Mapped["Parent"] = relationship(
         back_populates="childs"

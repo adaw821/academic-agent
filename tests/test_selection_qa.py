@@ -94,10 +94,17 @@ class SelectionTests(unittest.TestCase):
     def test_sources_and_document_labels(self):
         chunks = [dict(document_id=i, parent_id=i, filename=f"{i}.txt", parent_content=f"evidence {i}")
                   for i in (11, 12)]
+        chunks[0].update(section_id=3, heading_path=["Chapter", "Section"],
+                         page_numbers=[2, 3], child_page_numbers=[3])
         with self.models(chunks) as model:
             result = self.ask().json()
             self.assertEqual([s["index"] for s in result["sources"]], [1, 2])
             self.assertEqual(result["retrieved_contexts"], ["evidence 11", "evidence 12"])
+            self.assertEqual(result["sources"][0]["section_id"], 3)
+            self.assertEqual(result["sources"][0]["heading_path"], ["Chapter", "Section"])
+            self.assertEqual(result["sources"][0]["page_numbers"], [2, 3])
+            self.assertEqual(result["sources"][0]["child_page_numbers"], [3])
+            self.assertIsNone(result["sources"][1]["page_numbers"])
             prompt = model.invoke.call_args.args[0][1].content
             for text in ("gene passage", "资料范围：当前文档", "资料范围：项目其他文档"):
                 self.assertIn(text, prompt)
@@ -109,6 +116,67 @@ class SelectionTests(unittest.TestCase):
             self.assertNotIn("selection", response.json())
             self.assertEqual(response.json()["answer"], "没有检索到任何有用资料")
             model.invoke.assert_not_called()
+
+    def test_irrelevant_parents_do_not_reach_answer_model(self):
+        candidates = [dict(child_id=11, document_id=11, parent_id=11, filename="11.txt",
+                           child_content="unrelated", parent_content="unrelated context")]
+        reranker = Mock()
+        reranker.predict.return_value = [0.1]
+        with self.models() as model, \
+             patch.object(rag, "search_vector", return_value=candidates), \
+             patch.object(rag, "rerank_results", wraps=search.rerank_results), \
+             patch.object(search, "get_reranker", return_value=reranker):
+            response = self.client.post("/api/projects/1/ask", json={
+                "query": "An unsupported question", "doc_ids": [11],
+            })
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["retrieved_contexts"], [])
+            self.assertEqual(response.json()["sources"], [])
+            self.assertEqual(response.json()["answer"], "没有检索到任何有用资料")
+            model.invoke.assert_not_called()
+            reranker.predict.assert_called_once()
+
+    def test_ordinary_qa_reranks_children_and_returns_full_parent(self):
+        parent_text = "IBM Sequel Language was renamed as Structured Query Language."
+        candidates = [dict(child_id=i, document_id=11, parent_id=11, filename="11.txt",
+                           child_content=f"fragment {i}", parent_content=parent_text)
+                      for i in (1, 2)]
+        reranker = Mock()
+        reranker.predict.return_value = [0.2, 0.8]
+        with self.models() as model, \
+             patch.object(rag, "search_vector", return_value=candidates), \
+             patch.object(rag, "rerank_results", wraps=search.rerank_results), \
+             patch.object(search, "get_reranker", return_value=reranker):
+            response = self.client.post("/api/projects/1/ask", json={
+                "query": "How was SQL renamed?", "doc_ids": [11],
+            })
+            self.assertEqual(response.status_code, 200, response.text)
+            reranker.predict.assert_called_once()
+            self.assertEqual(reranker.predict.call_args.args[0],
+                             [["How was SQL renamed?", f"fragment {i}"] for i in (1, 2)])
+            self.assertEqual(response.json()["retrieved_contexts"], [parent_text])
+            self.assertEqual([source["parent_id"] for source in response.json()["sources"]], [11])
+            self.assertIn(parent_text, model.invoke.call_args.args[0][1].content)
+
+    def test_max_score_fallback_keeps_scope_and_reaches_answer(self):
+        candidates = [dict(child_id=11, document_id=11, parent_id=11, filename="11.txt",
+                           child_content="fragment", parent_content="SQL history evidence")]
+        reranker = Mock()
+        reranker.predict.side_effect = [[0.1], [0.8]]
+        with self.models() as model, \
+             patch.object(rag, "translate_query", return_value="SQL history"), \
+             patch.object(rag, "search_vector", return_value=candidates) as vector, \
+             patch.object(rag, "rerank_results", wraps=search.rerank_results), \
+             patch.object(search, "get_reranker", return_value=reranker):
+            response = self.client.post("/api/projects/1/ask", json={
+                "query": "SQL 的历史", "doc_ids": [11],
+            })
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["retrieved_contexts"], ["SQL history evidence"])
+            self.assertEqual([source["document_id"] for source in response.json()["sources"]], [11])
+            self.assertTrue(all(call.kwargs["doc_ids"] == [11] for call in vector.call_args_list))
+            self.assertEqual(reranker.predict.call_count, 2)
+            model.invoke.assert_called_once()
 
     def test_invalid_selection_and_permissions_stop_before_models(self):
         with self.models() as model:

@@ -1,3 +1,4 @@
+from app.services.performance import measure_stage, timed_stage, logger as performance_logger
 from pathlib import Path
 from uuid import uuid4
 import json
@@ -58,10 +59,8 @@ def require_project(db: Session, project_id: int, user: User) -> Project:
     if project.user_id != user.id:
         raise HTTPException(status_code=403, detail="无权访问该项目")
     return project
-# 【前端配套新增结束：项目权限检查】
 
 
-# 【前端配套新增：项目列表】前端侧栏展示当前用户的项目，刷新后也能重新读取。
 @router.get("/projects")
 def list_projects(db: Session = Depends(get_db), user: User = Depends(get_currentUser)):
     # where 限定项目归属；按 ID 倒序展示。scalars().all() 取出多个 Project 对象。
@@ -81,26 +80,32 @@ def list_documents(project_id: int, db: Session = Depends(get_db), user: User = 
 
 
 # 普通 def 后台任务由框架放到线程池执行，使用独立数据库会话
+@timed_stage("document.process")
 def process_document(document_id: int):
     with SessionLocal() as db:
         try:
-            document = db.get(Document, document_id)
-            if document is None:
-                raise ValueError(f"无效文档查询id: {document_id}")
-            document.status = "processing"
-            db.commit()
+            with measure_stage("document.pipeline"):
+                document = db.get(Document, document_id)
+                if document is None:
+                    raise ValueError(f"无效文档查询id: {document_id}")
+                document.status = "processing"
+                with measure_stage("document.processing_commit"):
+                    db.commit()
 
-            content = Path(document.storage_path).read_bytes()
-            chunking(
-                content=content,
-                db=db,
-                document_id=document_id,
-                file_name=document.filename,
-            )
+                with measure_stage("document.file_read"):
+                    content = Path(document.storage_path).read_bytes()
+                chunking(
+                    content=content,
+                    db=db,
+                    document_id=document_id,
+                    file_name=document.filename,
+                    image_output_dir=Path(document.storage_path).with_suffix(".images"),
+                )
 
-            # 分片和完成状态一起提交
-            document.status = "completed"
-            db.commit()
+                # 分片和完成状态一起提交
+                document.status = "completed"
+                with measure_stage("document.final_commit"):
+                    db.commit()
         except Exception:
             db.rollback()
             logger.exception("event=document_processing_failed document_id=%s", document_id)
@@ -116,6 +121,7 @@ def process_document(document_id: int):
 
 
 @router.post("/projects/{project_id}/documents", status_code=202)
+@timed_stage("upload.total")
 async def upload_files(
     project_id: int,
     files: list[UploadFile],
@@ -157,7 +163,8 @@ async def upload_files(
                 failed_files.append(original_filename)
                 continue
 
-            content = await file.read()
+            with measure_stage("upload.file_read"):
+                content = await file.read()
             if not content:
                 failed_files.append(original_filename)
                 continue
@@ -168,7 +175,8 @@ async def upload_files(
 
             #文件保存时间测速
             file_save_started_at = perf_counter()
-            storage_path.write_bytes(content)
+            with measure_stage("upload.file_save", size_bytes=len(content)):
+                storage_path.write_bytes(content)
             file_save_ms += (perf_counter() - file_save_started_at) * 1000
 
             created_paths.append(storage_path)
@@ -184,7 +192,8 @@ async def upload_files(
                 status="queued",
             )
             db.add(document_record)
-            db.flush()
+            with measure_stage("upload.db_flush"):
+                db.flush()
             saved_files.append(
                 {
                     "id": document_record.id,
@@ -194,7 +203,8 @@ async def upload_files(
             )
 
         commit_started_at = perf_counter()
-        db.commit()
+        with measure_stage("upload.commit"):
+            db.commit()
         commit_ms = (perf_counter() - commit_started_at) * 1000
 
     except Exception:
@@ -214,7 +224,7 @@ async def upload_files(
         for file in files:
             await file.close()
 
-    logger.info(
+    performance_logger.info(
         "event=document_upload_completed project_id=%s total_ms=%.2f "
         "file_save_ms=%.2f commit_ms=%.2f saved_count=%s failed_count=%s",
         project_id,
@@ -227,6 +237,10 @@ async def upload_files(
 
     # 文档记录提交成功后再登记任务，不传递本次请求的 db 或 UploadFile
     for item in saved_files:
+        performance_logger.info(
+            "event=document_queued project_id=%s document_id=%s",
+            project_id, item["id"],
+        )
         background_tasks.add_task(process_document, document_id=item["id"])
 
     return {
@@ -241,10 +255,8 @@ def get_document_status(
     project_id: int,
     document_id: int,
     db: Session = Depends(get_db),
-    # 【前端配套修改】原接口补上登录检查，user 来自有效会话。
     user: User = Depends(get_currentUser),
 ):
-    # 【前端配套修改】先检查项目归属，避免登录用户查询别人的文档状态。
     require_project(db, project_id, user)
     document = db.get(Document, document_id)
     if document is None or document.project_id != project_id:
@@ -260,7 +272,6 @@ def get_document_status(
 async def project_creator(
     project: ProjectCreate,
     db: Session = Depends(get_db),
-    # 【前端配套修改】根据 Cookie 得到当前用户，替代按请求中的 user_id 查用户。
     user: User = Depends(get_currentUser),
 ):
     new_project = Project(
@@ -298,6 +309,7 @@ def require_document_scope(
         raise HTTPException(status_code=409, detail="指定文档尚未完成处理，请检查文档状态")
     return unique_ids
 
+@timed_stage("qa.translate")
 def translate_query(query: str) -> str | None:
     translated_query = None
 
@@ -333,7 +345,8 @@ def translate_query(query: str) -> str | None:
 
     # 翻译仅为辅助；调用、解析或字段校验失败都回退到原问题。
     try:
-        response = translator.invoke(translation_message)
+        with measure_stage("qa.translate_llm"):
+            response = translator.invoke(translation_message)
         translation_results = json.loads(response.content)
         if not isinstance(translation_results, dict):
             raise ValueError("翻译结果必须是 JSON 对象")
@@ -353,6 +366,7 @@ def translate_query(query: str) -> str | None:
     return translated_query
 
 
+@timed_stage("qa.retrieve")
 def retrieve_documents(
         query: str,
         project_id: int,
@@ -373,6 +387,7 @@ def retrieve_documents(
     return results_vector,results_BM25
 
 @router.post("/projects/{project_id}/ask")
+@timed_stage("qa.total")
 def user_asking(
     project_id: int,
     request: SearchRequest,

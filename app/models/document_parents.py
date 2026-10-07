@@ -1,9 +1,10 @@
-from sqlalchemy import ForeignKey, Integer, Text
+from sqlalchemy import ForeignKey, Index, Integer, JSON, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.database import Base
 class Parent(Base):
-    """用来回答的大表"""
+    """父片表"""
     __tablename__ = "document_parent"
+    __table_args__ = (Index("ix_document_parent_document_section", "document_id", "section_id"),)
 
     id: Mapped[int] = mapped_column(
         Integer,
@@ -24,6 +25,11 @@ class Parent(Base):
         Integer,
         nullable=False
     )
+
+    # Section IDs are scoped to this document; legacy/non-PDF rows stay NULL.
+    section_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    heading_path: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    page_numbers: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
 
     document: Mapped["Document"] = relationship(
         back_populates="parents"
