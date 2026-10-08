@@ -13,11 +13,10 @@ def apply_image_ocr_results(
 ) -> None:
     """按扫描时保存的索引回填；不重新遍历文档，也不改变节点顺序。
 
-    Docling 导出会在图片原位置输出 meta.description 中的 Markdown，
-    来源仍是原图片的 prov，PDF/PPT 可以继续使用现有分片逻辑。
-    同一图片重复回填会替换描述，不追加重复正文；空结果不写入。
+    直接改docling返回结果的图片描述。
     """
     # 先校验全部结果，避免未知编号或错误类型导致只回填一部分。
+    #results是位置：视觉模型返回
     for reading_order, text in results.items():
         if reading_order not in pictures:
             raise ValueError(f"OCR 结果找不到对应图片：reading_order={reading_order}")

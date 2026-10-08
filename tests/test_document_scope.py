@@ -19,6 +19,8 @@ chunk_stub.chunking = Mock()
 chunk_stub.get_embedding_model = Mock(side_effect=AssertionError("No model calls"))
 answer_stub = types.ModuleType("app.services.answer_services")
 answer_stub.generate_answer = Mock(return_value={"answer": "test", "sources": []})
+answer_stub.get_history_messages = Mock(return_value=([], "", None))
+answer_stub.llm = Mock()
 translator_stub = types.ModuleType("langchain_openai")
 translator_stub.ChatOpenAI = Mock()
 translator_stub.ChatOpenAI.return_value.invoke.return_value = types.SimpleNamespace(
@@ -28,6 +30,8 @@ reranker_stub = types.ModuleType("sentence_transformers")
 reranker_stub.CrossEncoder = Mock(side_effect=AssertionError("No reranker calls"))
 torch_nn_stub = types.ModuleType("torch.nn")
 torch_nn_stub.Sigmoid = Mock()
+transformers_stub = types.ModuleType("transformers")
+transformers_stub.AutoTokenizer = Mock(side_effect=AssertionError("No tokenizer downloads"))
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -48,12 +52,18 @@ with patch.dict(sys.modules, {
     "langchain_openai": translator_stub,
     "sentence_transformers": reranker_stub,
     "torch.nn": torch_nn_stub,
+    "transformers": transformers_stub,
 }), patch.dict(os.environ, {"ZHIPU_API_KEY": "test-only"}):
-    from app.routers import rag
+    from app.routers import rag_flow as rag
     from app.services import search_services as search
 
 
 class DocumentScopeTests(unittest.TestCase):
+    @classmethod
+    def tearDownClass(cls):
+        engine.dispose()
+        TEMP.cleanup()
+
     @classmethod
     def setUpClass(cls):
         tables = [User.__table__, Project.__table__, Document.__table__,
@@ -84,6 +94,7 @@ class DocumentScopeTests(unittest.TestCase):
             db.commit()
 
     def setUp(self):
+        self.enterContext(patch.object(rag, "history_messages_control", return_value=1))
         app = FastAPI()
         app.include_router(rag.router)
         app.dependency_overrides[rag.get_currentUser] = lambda: types.SimpleNamespace(id=1)
@@ -160,7 +171,7 @@ class DocumentScopeTests(unittest.TestCase):
             final_chunks = answer.call_args.args[1]
             self.assertEqual(len(final_chunks), 1)
             self.assertEqual(final_chunks[0]["total_score"], 0.8)
-            self.assertIsNone(final_chunks[0]["translated_rerank_score"])
+            self.assertEqual(final_chunks[0]["score_mode"], "original")
 
     def test_translation_call_failure_keeps_original_retrieval(self):
         for error in [TimeoutError("simulated timeout"), RuntimeError("simulated API failure")]:
@@ -191,7 +202,7 @@ class DocumentScopeTests(unittest.TestCase):
                                  ["gene", "translated gene"])
                 self.assertTrue(all(call.kwargs["doc_ids"] == [11]
                                     for call in retrieve.call_args_list))
-            rerank.assert_called_once_with("gene", "translated gene", [])
+            rerank.assert_called_once_with("gene", "translated gene", [], [])
             self.assertIn("JSON 的 null", translate.call_args.args[0][0].content)
 
     def test_invalid_scope_skips_translation(self):

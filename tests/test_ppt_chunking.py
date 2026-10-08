@@ -96,11 +96,11 @@ class PptIngestionTests(unittest.TestCase):
 
     def test_exports_sorted_pages_and_never_mixes_parents(self):
         pages = {3: INTRO, 4: "\n<!-- image -->\n", 5: "# Basic Query\n\n- Launch XAMPP and MySQL.", 6: "# End"}
-        document = Mock()
+        document = Mock(pictures=[])
         document.pages = {6: None, 5: None, 4: None, 3: None}
         document.export_to_markdown.side_effect = lambda *, page_no: pages[page_no]
         converter = Mock()
-        converter.convert.return_value = SimpleNamespace(document=document)
+        converter.convert.return_value = SimpleNamespace(document=document, status=self.chunk.ConversionStatus.SUCCESS)
         with patch.object(self.chunk, "get_document_converter", return_value=converter), \
              patch.object(self.chunk, "get_embedding_model", return_value=self.embedding):
             self.chunk.chunking(b"fake", self.db, 99, self.file_name)
@@ -117,11 +117,11 @@ class PptIngestionTests(unittest.TestCase):
         self.assertTrue(all(len(r.embedding) == 1024 for r in children))
 
     def test_title_and_image_only_document_fails_without_loading_embedding(self):
-        document = Mock()
+        document = Mock(pictures=[])
         document.pages = {1: None}
         document.export_to_markdown.return_value = "# Query\n\n<!-- image -->"
         converter = Mock()
-        converter.convert.return_value = SimpleNamespace(document=document)
+        converter.convert.return_value = SimpleNamespace(document=document, status=self.chunk.ConversionStatus.SUCCESS)
         with patch.object(self.chunk, "get_document_converter", return_value=converter), \
              patch.object(self.chunk, "get_embedding_model") as get_embedding:
             with self.assertRaisesRegex(ValueError, "没有可检索的正文"):
@@ -130,10 +130,10 @@ class PptIngestionTests(unittest.TestCase):
         self.assertEqual(self.records, [])
 
     def test_missing_pages_fails_without_writing_records(self):
-        document = Mock()
+        document = Mock(pictures=[])
         document.pages = {}
         converter = Mock()
-        converter.convert.return_value = SimpleNamespace(document=document)
+        converter.convert.return_value = SimpleNamespace(document=document, status=self.chunk.ConversionStatus.SUCCESS)
         with patch.object(self.chunk, "get_document_converter", return_value=converter), \
              patch.object(self.chunk, "get_embedding_model") as get_embedding:
             with self.assertRaisesRegex(ValueError, "解析结果缺少页码"):

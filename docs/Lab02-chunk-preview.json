@@ -1,0 +1,150 @@
+{
+  "summary": {
+    "slides": 18,
+    "old_parent_count": 3,
+    "old_child_counts": {
+      "150": 55,
+      "300": 26
+    },
+    "new_parent_count": 14,
+    "new_child_count": 14
+  },
+  "pages": [
+    {
+      "page_no": 1,
+      "parent": "# Lab 2 Basic SQL\n\nUnited International College",
+      "children": [
+        "# Lab 2 Basic SQL\n\nUnited International College"
+      ],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 2,
+      "parent": "# Outline\n\n- Basic Query\n\n- Predicate\n\n- Exercises",
+      "children": [
+        "# Outline\n\n- Basic Query\n\n- Predicate\n\n- Exercises"
+      ],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 3,
+      "parent": "# Introduction\n\n- IBM Sequel Language was developed as a part of System R project to manage data in a relational database in the early 1970’s.\n\n- Later the language was renamed as Structured Query Language, aka SQL (reads “S-Q-L” or “sequel”).\n\n- SQL can define and manipulate data.\n\n- Data definition is used when a user wants to create new databases or tables.\n\n- Data manipulation or querying allows users search information from the database.\n\n- The labs start from querying. Data definitions will be introduced in Lab 6.",
+      "children": [
+        "# Introduction\n\n- IBM Sequel Language was developed as a part of System R project to manage data in a relational database in the early 1970’s.\n\n- Later the language was renamed as Structured Query Language, aka SQL (reads “S-Q-L” or “sequel”).\n\n- SQL can define and manipulate data.\n\n- Data definition is used when a user wants to create new databases or tables.\n\n- Data manipulation or querying allows users search information from the database.\n\n- The labs start from querying. Data definitions will be introduced in Lab 6."
+      ],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 4,
+      "parent": "# Query\n\n- A query is a question asked by database users to retrieve some data.\n\n- For example, “what are the students whose GPA is greater than 3.0?”\n\n- Database systems search for the students who satisfy the condition.\n\n- The query language cannot change data in databases. Only data definition language can.\n\n- Thus, the answers to queries only temporarily exist.",
+      "children": [
+        "# Query\n\n- A query is a question asked by database users to retrieve some data.\n\n- For example, “what are the students whose GPA is greater than 3.0?”\n\n- Database systems search for the students who satisfy the condition.\n\n- The query language cannot change data in databases. Only data definition language can.\n\n- Thus, the answers to queries only temporarily exist."
+      ],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 5,
+      "parent": "# Basic Query\n\n- Execute XAMPP and launch Apache and MySQL servers.\n\n- Open phpMyAdmin.\n\n- (Suppose the database “sakila” is already imported.) Select “sakila” from the database list.\n\n- Click “SQL” from the menu bar.\n\n- Type in the query “SELECT * FROM actor WHERE 1” and click “Go”.",
+      "children": [
+        "# Basic Query\n\n- Execute XAMPP and launch Apache and MySQL servers.\n\n- Open phpMyAdmin.\n\n- (Suppose the database “sakila” is already imported.) Select “sakila” from the database list.\n\n- Click “SQL” from the menu bar.\n\n- Type in the query “SELECT * FROM actor WHERE 1” and click “Go”."
+      ],
+      "image_placeholders": 1
+    },
+    {
+      "page_no": 6,
+      "parent": "# Basic Query\n\n- A part of the answer is like this.\n\n- Same as selecting the table “actor” from the database list (what we have done in the last lab.)",
+      "children": [
+        "# Basic Query\n\n- A part of the answer is like this.\n\n- Same as selecting the table “actor” from the database list (what we have done in the last lab.)"
+      ],
+      "image_placeholders": 1
+    },
+    {
+      "page_no": 7,
+      "parent": "# Basic Query\n\n- The basic query has three clauses: SELECT, FROM, and WHERE.\n\n- SELECT: contains one or multiple attributes.\n\n- These attributes are displayed in the result.\n\n- The symbol “*” means all attributes.\n\n- The FROM clause contains one or more tables.\n\n- This lab handles the one table case.\n\n- The WHERE clause contains a single predicate.\n\n- It is a logical test on every row of the table which returns true or false.\n\n- If multiple queries are executed at the same time, a semicolon “;” is used as a delimiter to split two queries.\n\n- A query is executed as follows.\n\n- The system test the predicate on every tuple from the table in the FROM clause.\n\n- If a tuple satisfies the predicate, show the values of the attributes in the SELECT clause in the result.",
+      "children": [
+        "# Basic Query\n\n- The basic query has three clauses: SELECT, FROM, and WHERE.\n\n- SELECT: contains one or multiple attributes.\n\n- These attributes are displayed in the result.\n\n- The symbol “*” means all attributes.\n\n- The FROM clause contains one or more tables.\n\n- This lab handles the one table case.\n\n- The WHERE clause contains a single predicate.\n\n- It is a logical test on every row of the table which returns true or false.\n\n- If multiple queries are executed at the same time, a semicolon “;” is used as a delimiter to split two queries.\n\n- A query is executed as follows.\n\n- The system test the predicate on every tuple from the table in the FROM clause.\n\n- If a tuple satisfies the predicate, show the values of the attributes in the SELECT clause in the result."
+      ],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 8,
+      "parent": "# Basic Query",
+      "children": [],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 9,
+      "parent": "# Basic Query\n\n- Let’s see another example.\n\nSELECT title,release\\_year FROM film WHERE rental\\_rate&lt;1\n\n- Please try to tell the meaning of this query.\n\n- And execute it in the system to check the outcome.",
+      "children": [
+        "# Basic Query\n\n- Let’s see another example.\n\nSELECT title,release\\_year FROM film WHERE rental\\_rate&lt;1\n\n- Please try to tell the meaning of this query.\n\n- And execute it in the system to check the outcome."
+      ],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 10,
+      "parent": "# Predicate\n\n- The predicate in the WEHER clause is regarded as a logic test. The return value of a predicate is a Boolean, either 1 (True) or 0 (False).\n\n- Formally,\n\n- suppose op is a relation operator, which can be =, &gt;, &gt;=, &lt;, &lt;=, and &lt;&gt; (not equal);\n\n- a predicate can be a single term\n\npred = term\n\nterm = exp op exp\n\n“exp” is an arithmetic expression which contains attributes and constants.\n\n- For example,\n\n- rental\\_rate &lt; 1",
+      "children": [
+        "# Predicate\n\n- The predicate in the WEHER clause is regarded as a logic test. The return value of a predicate is a Boolean, either 1 (True) or 0 (False).\n\n- Formally,\n\n- suppose op is a relation operator, which can be =, &gt;, &gt;=, &lt;, &lt;=, and &lt;&gt; (not equal);\n\n- a predicate can be a single term\n\npred = term\n\nterm = exp op exp\n\n“exp” is an arithmetic expression which contains attributes and constants.\n\n- For example,\n\n- rental\\_rate &lt; 1"
+      ],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 11,
+      "parent": "# Predicate\n\n- A predicate can also be a composition of terms.\n\npred = NOT pred\n\npred = pred AND pred\n\npred = pred OR pred\n\n- NOT, AND, OR are logical operators.\n\n- For example,\n\n- NOT rental\\_rate &lt; 1\n\n- (NOT rental\\_rate &lt; 1) AND release\\_year = 2006\n\n- Sometimes brackets are used to indicate the precedence.\n\n- If the WHERE clause does not return a Boolean, the query has a syntax error.",
+      "children": [
+        "# Predicate\n\n- A predicate can also be a composition of terms.\n\npred = NOT pred\n\npred = pred AND pred\n\npred = pred OR pred\n\n- NOT, AND, OR are logical operators.\n\n- For example,\n\n- NOT rental\\_rate &lt; 1\n\n- (NOT rental\\_rate &lt; 1) AND release\\_year = 2006\n\n- Sometimes brackets are used to indicate the precedence.\n\n- If the WHERE clause does not return a Boolean, the query has a syntax error."
+      ],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 12,
+      "parent": "# Predicate",
+      "children": [],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 13,
+      "parent": "# String constant\n\n- The constant in the comparison can be a string, but it has to be quoted in the quotation marks.\n\n- For example,\n\nSELECT * FROM film WHERE rating=\"PG-13\"\n\n- Try this example and tell the meaning of the query.",
+      "children": [
+        "# String constant\n\n- The constant in the comparison can be a string, but it has to be quoted in the quotation marks.\n\n- For example,\n\nSELECT * FROM film WHERE rating=\"PG-13\"\n\n- Try this example and tell the meaning of the query."
+      ],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 14,
+      "parent": "# Case insensitive\n\n- SQL is case insensitive.\n\n- For example,\n\nSeLeCt * From Film wHERE rAtIng=\"pg-13\"\n\ngives the same answer as the previous example.\n\n- However, to make query readable, we write\n\n- key words (like SELECT, FROM, etc.) in capital;\n\n- attributes and tables in lower cases; and\n\n- string constant in the original form.",
+      "children": [
+        "# Case insensitive\n\n- SQL is case insensitive.\n\n- For example,\n\nSeLeCt * From Film wHERE rAtIng=\"pg-13\"\n\ngives the same answer as the previous example.\n\n- However, to make query readable, we write\n\n- key words (like SELECT, FROM, etc.) in capital;\n\n- attributes and tables in lower cases; and\n\n- string constant in the original form."
+      ],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 15,
+      "parent": "# Basic Query",
+      "children": [],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 16,
+      "parent": "# Example\n\n- To write a good query, you need to pay attention to three things.\n\n1. Which table is used?\n\n2. What is the predicate?\n\n3. What are the attributes in the result?\n\n- For example, “Find the category ID for Sci-Fi movies”.\n\n4. Table: category\n\n5. Predicate: Sci-Fi movies\n\n6. Attribute: category ID\n\n- Thus, the query is\n\nSELECT category\\_id FROM category WHERE name=\"Sci-Fi\"\n\n- For this example, you need to know “Sci-Fi movies” is the attribute “name” of the category.",
+      "children": [
+        "# Example\n\n- To write a good query, you need to pay attention to three things.\n\n1. Which table is used?\n\n2. What is the predicate?\n\n3. What are the attributes in the result?\n\n- For example, “Find the category ID for Sci-Fi movies”.\n\n4. Table: category\n\n5. Predicate: Sci-Fi movies\n\n6. Attribute: category ID\n\n- Thus, the query is\n\nSELECT category\\_id FROM category WHERE name=\"Sci-Fi\"\n\n- For this example, you need to know “Sci-Fi movies” is the attribute “name” of the category."
+      ],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 17,
+      "parent": "# Exercises\n\nWrite SQLs for the following questions.\n\n1. Find the information of actors whose first name is Russell.\n\n2. Find the information of actors whose first name is Russell and last name is Close.\n\n3. Find the email of customers whose first name is Harry and active is 0.\n\n4. Find the full name of the actor whose id is 99.\n\n5. Find the title and special features of the films whose replacement cost is lower than 20 and rental rate is higher than 4.0.\n\n6. Find the customer id of the customers who have made a payment on 2005-05-25 but the amount does not exceed 3.\n\nSave your queries in a txt file. Rename it as “COMP3013 Lab2 ###.txt”, where “###” is your student ID. And submit it on iSpace. The DDL is 24 hours after the lab.",
+      "children": [
+        "# Exercises\n\nWrite SQLs for the following questions.\n\n1. Find the information of actors whose first name is Russell.\n\n2. Find the information of actors whose first name is Russell and last name is Close.\n\n3. Find the email of customers whose first name is Harry and active is 0.\n\n4. Find the full name of the actor whose id is 99.\n\n5. Find the title and special features of the films whose replacement cost is lower than 20 and rental rate is higher than 4.0.\n\n6. Find the customer id of the customers who have made a payment on 2005-05-25 but the amount does not exceed 3.\n\nSave your queries in a txt file. Rename it as “COMP3013 Lab2 ###.txt”, where “###” is your student ID. And submit it on iSpace. The DDL is 24 hours after the lab."
+      ],
+      "image_placeholders": 0
+    },
+    {
+      "page_no": 18,
+      "parent": "# End of Lab 2",
+      "children": [],
+      "image_placeholders": 0
+    }
+  ]
+}

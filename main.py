@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from app.services.startup import lifespan
 
 from app.models.users import User
 from app.models.courses import Course
@@ -12,7 +13,7 @@ from app.routers.timetable_upload import router as timetable_router
 from app.routers.rag_flow import router as rag_router
 from app.routers.user_routers import router as user_router
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 app.include_router(
     timetable_router,
     prefix="/api"

@@ -1,7 +1,7 @@
-"""Upload a local corpus, wait for parsing, and ask independent Markdown questions.
+"""Ask independent Markdown questions against an existing or newly uploaded corpus.
 
 Run with the project's agent/Scripts/python.exe; requires httpx (already installed).
-No reference answers are submitted. Credentials stay in memory and are not saved.
+No reference answers are submitted. Credentials are never written to result files.
 """
 import argparse
 from datetime import datetime, timezone
@@ -25,20 +25,28 @@ TYPES = {".pdf": "application/pdf", ".txt": "text/plain",
 
 
 def read_questions(path):
-    """Only question headings are input; historical answers/results are excluded."""
+    """Read inline headings or frozen Q blocks; references remain local metadata."""
     questions = []
     seen = set()
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        match = re.match(r"^####\s+(Q\d+)\b.*?问题[：:]\s*(.+?)\s*$", line)
-        if not match:
-            continue
-        qid, query = match.groups()
+    text = path.read_text(encoding="utf-8-sig")
+    blocks = re.split(r"(?m)^#{2,4}\s+(Q\d+)\b([^\n]*)\n?", text)
+    for offset in range(1, len(blocks), 3):
+        qid, heading, content = blocks[offset:offset + 3]
+        inline = re.search(r"问题[：:]\s*(.+)", heading)
+        question = re.search(r"(?m)^\*\*问题\*\*[：:]\s*(.+)$", content)
+        if inline is None and question is None:
+            raise ValueError(f"题目缺少问题正文：{qid}")
+        query = (inline or question).group(1).strip()
         if qid in seen or not 1 <= len(query) <= 10000:
             raise ValueError(f"题目重复或长度不合法：{qid}")
         seen.add(qid)
-        questions.append({"id": qid, "query": query})
+        entry = {"id": qid, "query": query}
+        reference = re.search(r"(?m)^\*\*参考答案\*\*[：:]\s*(.+)$", content)
+        if reference:
+            entry["reference"] = reference.group(1).strip()
+        questions.append(entry)
     if not questions:
-        raise ValueError("未找到题目；应使用 #### Q01 ... 问题：... 格式")
+        raise ValueError("未找到题目；支持 #### Q01 ... 问题：... 或 ## Q01 标题后跟 **问题**：... 格式")
     return questions
 
 
@@ -172,6 +180,8 @@ def ask_questions(api, project_id, questions, percentage, run_dir):
                 "conversation_id": None}
         record = {"question_id": question["id"], "request": body,
                   "started_at": datetime.now(timezone.utc).isoformat()}
+        if "reference" in question:
+            record["reference"] = question["reference"]
         print(f"提问 [{index}/{len(questions)}] {question['id']} {question['query']}", flush=True)
         started = time.perf_counter()
         auth_failed = False
@@ -195,6 +205,14 @@ def ask_questions(api, project_id, questions, percentage, run_dir):
         save_json(run_dir / f"{question['id']}.json", record)
         with (run_dir / "results.jsonl").open("a", encoding="utf-8") as output:
             output.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if record["request_ok"]:
+            payload = record["response"]
+            sample = {"user_input": question["query"], "response": payload["answer"],
+                      "retrieved_contexts": payload["retrieved_contexts"]}
+            if "reference" in question:
+                sample["reference"] = question["reference"]
+            with (run_dir / "ragas.jsonl").open("a", encoding="utf-8") as output:
+                output.write(json.dumps(sample, ensure_ascii=False) + "\n")
         write_report(run_dir, results)
         print(f"  HTTP {record['http_status']}，耗时 {record['elapsed_seconds']} 秒", flush=True)
         if auth_failed or record["http_status"] in (401, 403, 404):
@@ -218,6 +236,8 @@ def write_report(run_dir, results):
                       "来源：`" + json.dumps(payload.get("sources", []), ensure_ascii=False) + "`", ""]
         if record.get("error"):
             lines += [record["error"], record["note"], ""]
+        if "reference" in record:
+            lines += ["参考答案（仅本地核对）：" + record["reference"], ""]
         lines += ["人工判定：待核对", ""]
     (run_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -225,10 +245,13 @@ def write_report(run_dir, results):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--questions", type=Path, required=True)
-    parser.add_argument("--files-dir", type=Path, required=True)
+    corpus = parser.add_mutually_exclusive_group(required=True)
+    corpus.add_argument("--files-dir", type=Path)
+    corpus.add_argument("--skip-upload", action="store_true", help="直接提问已有项目，要求所有文档处理完成")
     parser.add_argument("--project-id", type=int, default=1)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--account", help="登录邮箱或手机号；不填则运行时询问")
+    parser.add_argument("--credentials-file", type=Path, help="本地 JSON 登录配置，包含 account/password")
     parser.add_argument("--candidate-percentage", type=float, default=0.4)
     parser.add_argument("--request-timeout", type=float, default=600)
     parser.add_argument("--parse-timeout", type=float, default=7200)
@@ -245,16 +268,31 @@ def main():
     questions = read_questions(args.questions)
     if len(questions) != args.expected_count:
         raise ValueError(f"题目数量为 {len(questions)}，预期 {args.expected_count}，请核对题集")
-    files = discover_files(args.files_dir)
-    print(f"项目 {args.project_id}；{len(files)} 个文件；{len(questions)} 道独立问题；召回比例 {args.candidate_percentage}")
+    files = discover_files(args.files_dir) if args.files_dir else []
+    corpus_label = "使用项目现有文档" if args.skip_upload else f"{len(files)} 个文件"
+    print(f"项目 {args.project_id}；{corpus_label}；{len(questions)} 道独立问题；召回比例 {args.candidate_percentage}")
     for path in files:
         print(f"  文件：{path.name} ({path.stat().st_size / 1024 / 1024:.1f} MiB)")
     if args.dry_run:
         for question in questions:
             print(f"  {question['id']}: {question['query']}")
         return 0
-    account = args.account or input("登录邮箱或手机号：").strip()
-    password = getpass.getpass("登录密码（不回显、不保存）：")
+    if args.credentials_file:
+        try:
+            credentials = json.loads(args.credentials_file.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            raise ValueError("无法读取登录配置，请检查文件路径和 JSON 格式") from None
+        if not isinstance(credentials, dict) or any(
+            not isinstance(credentials.get(key), str) or not credentials[key].strip()
+            for key in ("account", "password")
+        ):
+            raise ValueError("登录配置必须包含非空字符串 account 和 password")
+        account, password = credentials["account"].strip(), credentials["password"]
+        if args.account and args.account != account:
+            raise ValueError("--account 与登录配置账号不一致，请使用对应的登录配置")
+    else:
+        account = args.account or input("登录邮箱或手机号：").strip()
+        password = getpass.getpass("登录密码（不回显、不保存）：")
     if not account or not password:
         raise ValueError("账号和密码不能为空")
     run_dir = args.output_root / (datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:6])
@@ -262,6 +300,7 @@ def main():
     print(f"结果目录：{run_dir}", flush=True)
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
     metadata = {"project_id": args.project_id, "base_url": args.base_url,
+                "corpus_mode": "existing_project" if args.skip_upload else "upload",
                 "candidate_k_percentage": args.candidate_percentage, "conversation_mode": "independent",
                 "questions_path": str(args.questions.resolve()), "questions_sha256": digest(args.questions),
                 "client_workspace_commit": commit.stdout.strip(), "server_commit": "未核验",
@@ -272,7 +311,11 @@ def main():
         with httpx.Client(base_url=args.base_url.rstrip("/"), timeout=args.request_timeout,
                           follow_redirects=False, trust_env=False) as client:
             api = API(client, account, password)
-            mapping = upload_corpus(api, args.project_id, files, run_dir, args.reuse_existing)
+            if args.skip_upload:
+                mapping = existing_corpus(api, args.project_id)
+                save_json(run_dir / "documents.json", mapping)
+            else:
+                mapping = upload_corpus(api, args.project_id, files, run_dir, args.reuse_existing)
             wait_for_documents(api, args.project_id, mapping, args.parse_timeout, args.poll_interval)
             results = ask_questions(api, args.project_id, questions, args.candidate_percentage, run_dir)
         metadata["status"] = "completed" if all(r["request_ok"] for r in results) else "completed_with_errors"
@@ -285,6 +328,16 @@ def main():
     finally:
         metadata["finished_at"] = datetime.now(timezone.utc).isoformat()
         save_json(run_dir / "run.json", metadata)
+
+
+def existing_corpus(api, project_id):
+    documents = api.documents(project_id)
+    if not documents:
+        raise RuntimeError("项目没有文档，请先上传测试资料")
+    if any(doc["status"] != "completed" for doc in documents):
+        raise RuntimeError("项目存在未完成或失败的文档，请处理完成后再提问")
+    return [{"document_id": doc["id"], "filename": doc["filename"], "reused": True}
+            for doc in documents]
 
 
 if __name__ == "__main__":

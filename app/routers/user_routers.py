@@ -9,7 +9,7 @@ from app.schemas.users import UserCreate, UserLogin
 from pwdlib import PasswordHash
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select, or_
-# 【前端配套新增】get_currentUser 验证登录；UserSession 用于退出时删除会话。
+# get_currentUser 验证登录；UserSession 用于退出时删除会话。
 from app.services.user_services import generate_token, get_currentUser
 from app.models.user_session import UserSession
 

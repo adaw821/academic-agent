@@ -46,9 +46,9 @@ PDF 父片和每个子片携带完整标题路径（例如 `数据库 > 索引 >
 
 PDF/PPT 上传解析后还会提取 Docling 的图片节点，写入原上传文件旁的 `<文件存储名>.images/`，其中包含 PNG 和 `manifest.json`。入口为 `app/services/image_extraction.py` 的 `extract_document_images(document, document_id, output_dir)`，返回图片记录列表；无需新增数据库迁移。
 
-每条记录包含 `image_id`、`source_ref`（Docling 节点引用）、`page_no`、`bbox`、`reading_order` 和相对输出目录的 `image_path`。`reading_order` 是遍历所有正文内容项（含图片子节点）的零起始序号，不是图片序号，也不是视觉模型校正后的顺序。坐标保留 Docling 的 `coord_origin`；`provenance` 保存全部来源位置及页面尺寸，顶层页码/坐标取第一个来源。`status=unavailable` 表示节点缺少可用像素或读取失败，不会伪造图片路径。后续识别只消费 `status=saved` 的记录。
+每条记录包含 `image_id`、`source_ref`（Docling 节点引用）、`page_no`、`bbox`、`reading_order` 和相对输出目录的 `image_path`。`reading_order` 是遍历所有正文内容项（含图片子节点）的零起始序号，不是图片序号，也不是视觉模型校正后的顺序。坐标保留 Docling 的 `coord_origin`；`provenance` 保存全部来源位置及页面尺寸，顶层页码/坐标取第一个来源。`status=unavailable` 表示节点缺少可用像素或读取失败，不会伪造图片路径。图片留档发生在内置描述完成之后，`saved/filtered` 仅表示 PNG 留档状态，不表示是否调用过视觉模型。
 
-本步骤仅提取解析出的图片节点，不会把所有页面渲染成图片，也不保证覆盖未被 Docling 检出的图形。Docling 自带 PDF OCR 已关闭，仍提取 PDF 文字层并保存图片，图片计划统一交给视觉模型；尚未接入图片识别、分片关联或前端展示。纯图片文档可能仍因缺少可检索正文而处理失败，但已提取图片会保留，供后续识别使用。日志事件 `document_images_extracted` 记录数量和提取耗时。
+PDF/PPT 图片识别使用 Docling 内置 `PictureDescriptionApiOptions`，在转换阶段调用 `glm-4.6v-flash` 并写入图片描述；沿用 `ZHIPU_API_KEY`。提示词要求有字完整转录、无字简短描述，直接输出 Markdown。描述随后进入现有父子分片。PDF `do_ocr=False`，仍提取原生文字层；图片描述不等于整页 OCR，不保证覆盖未被识别为图片的扫描内容。配置、测试方式和限制见 [Docling 图片描述实验](docs/docling-picture-description.md)。
 
 ## 2. 环境要求
 
@@ -259,7 +259,9 @@ POST http://127.0.0.1:8000/api/projects/{project_id}/documents
 
 预期结果：HTTP 状态码为 `202`，`saved_files` 中出现成功保存并排队的文件，`failed_files` 中出现空文件或不支持的文件。随后调用文档状态接口，等 `status=completed` 才能检查分片和正式提问。
 
-首次后台处理可能因为模型下载和初始化而耗时较长。上传响应耗时与后台处理完成耗时应分开记录：
+服务启动时会预加载 BGE-M3 向量模型、BGE reranker 和 GLM tokenizer，加载完成后才接受请求；加载失败会使启动失败。各项耗时见 `startup.embedding_model`、`startup.reranker`、`startup.tokenizer` 和 `startup.models`，完成事件为 `startup_models_ready`。请求继续复用原有缓存。每个 worker 进程独立加载，首次启动可能需要下载模型；Docling 解析器仍在首次文档处理时初始化。此步骤不执行推理预热，首次实际推理仍可能有额外初始化开销。
+
+上传响应耗时与后台处理完成耗时应分开记录：
 
 - 文件名和文件大小；
 - 请求总耗时；
@@ -589,3 +591,7 @@ git rev-parse --short HEAD
 - 当前没有自动清理测试数据的功能，请为测试使用独立数据库。
 
 问答人工测试与后续评测见 [问答功能测试指南](问答功能测试指南.md)。
+
+## LangGraph 工作流
+
+问答与文档处理已使用 LangGraph StateGraph 编排，接口保持兼容。节点、条件分支、运行命令和事务边界见 [LangGraph 流程说明](docs/langgraph-workflows.md)。节点耗时继续写入 `logs/performance.log`。

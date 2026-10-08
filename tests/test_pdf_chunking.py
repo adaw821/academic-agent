@@ -228,7 +228,7 @@ class PdfIngestionTests(unittest.TestCase):
 
         db.add.side_effect = add
         converter = Mock()
-        converter.convert.return_value = SimpleNamespace(document=doc)
+        converter.convert.return_value = SimpleNamespace(document=doc, status=self.chunk.ConversionStatus.SUCCESS)
         embedding = Mock()
         embedding.encode.side_effect = lambda texts, **kwargs: np.zeros((len(texts), 1024))
         with patch.object(self.chunk, "get_document_converter", return_value=converter), \
@@ -251,7 +251,7 @@ class PdfIngestionTests(unittest.TestCase):
         doc = document()
         heading(doc, "Title only")
         converter = Mock()
-        converter.convert.return_value = SimpleNamespace(document=doc)
+        converter.convert.return_value = SimpleNamespace(document=doc, status=self.chunk.ConversionStatus.SUCCESS)
         db = Mock()
         with patch.object(self.chunk, "get_document_converter", return_value=converter), \
              patch.object(self.chunk, "get_embedding_model") as embedding:

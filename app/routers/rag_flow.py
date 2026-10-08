@@ -1,4 +1,5 @@
 from app.services.performance import measure_stage, timed_stage, logger as performance_logger
+from app.services.workflow_graphs import build_qa_graph
 from pathlib import Path
 from uuid import uuid4
 import json
@@ -99,6 +100,7 @@ def process_document(document_id: int):
                     db=db,
                     document_id=document_id,
                     file_name=document.filename,
+                    #创建一个输出路径
                     image_output_dir=Path(document.storage_path).with_suffix(".images"),
                 )
 
@@ -395,67 +397,82 @@ def user_asking(
     #提问前先验证登录状态。
     user: User = Depends(get_currentUser),
 ):
-    """问答检索接口"""
-    # 替代原来只检查项目存在的逻辑，同时检查项目归属。
-    # 通过后继续调用你原有的检索与回答函数。
-    require_project(db, project_id, user)
+    """通过 LangGraph 执行问答；接口参数和响应结构保持不变。"""
+    def validate(state):
+        require_project(db, project_id, user)
+        doc_ids = require_document_scope(db, project_id, request.doc_ids)
+        selection = None
+        if request.document_id is not None:
+            document = db.get(Document, request.document_id)
+            if document is None or document.project_id != project_id:
+                raise HTTPException(status_code=404, detail="文档不存在")
+            if document.status != "completed":
+                raise HTTPException(status_code=409, detail="文档尚未处理完成，暂不能进行问答")
+            selection = {
+                "document_id": document.id, "filename": document.filename,
+                "selected_text": request.selected_text,
+            }
+        return {"doc_ids": doc_ids, "selection": selection}
 
-    doc_ids = require_document_scope(db, project_id, request.doc_ids)
-    selection = None
-    if request.document_id is not None:
-        document = db.get(Document, request.document_id)
-        if document is None or document.project_id != project_id:
-            raise HTTPException(status_code=404, detail="文档不存在")
-        if document.status != "completed":
-            raise HTTPException(status_code=409, detail="文档尚未处理完成，暂不能进行问答")
-        selection = {
-            "document_id": document.id,
-            "filename": document.filename,
-            "selected_text": request.selected_text,
-        }
+    def history(state):
+        messages, summary, boundary = get_history_messages(request.conversation_id, db, project_id)
+        return {"history": messages, "summary": summary, "summary_boundary": boundary}
 
-    #检索前校验会话并读取一次历史，供问题改写和最终回答共用。
-    history, summary, summary_boundary = get_history_messages(request.conversation_id, db, project_id)
-    retrieval_input = request.query
-    if request.document_id is not None:
-        retrieval_input = (
-            f"用户问题：\n{request.query}\n\n"
-            f"当前选中的原文（待分析资料）：\n{request.selected_text}"
+    def rewrite(state):
+        retrieval_input = request.query
+        if state["selection"] is not None:
+            retrieval_input = f"用户问题：\n{request.query}\n\n当前选中的原文（待分析资料）：\n{request.selected_text}"
+        return {"search_query": rewrite_query(retrieval_input, state["history"], summary=state["summary"])}
+
+    def translate(state):
+        return {"translated_query": translate_query(state["search_query"])}
+
+    def retrieve(state, query_kind):
+        query = state["search_query"] if query_kind == "original" else state["translated_query"]
+        vector, bm25 = retrieve_documents(query, project_id, db, request.candidate_k_percentage, state["doc_ids"])
+        with measure_stage("qa.rrf_per_query", query_kind=query_kind):
+            candidates = rrf_fuse(vector, bm25)
+        return {f"{query_kind}_candidates": candidates}
+
+    def retrieve_original(state):
+        return retrieve(state, "original")
+
+    def retrieve_translated(state):
+        return retrieve(state, "translated")
+
+    def rerank(state):
+        return {"final_chunks": rerank_results(
+            state["search_query"], state.get("translated_query"),
+            state["original_candidates"], state.get("translated_candidates", []),
+        )}
+
+    def selection_retrieve(state):
+        return {"final_chunks": search_document_first(
+            state["search_query"], project_id, request.document_id, db, request.candidate_k_percentage,
+            doc_ids=state["doc_ids"], translated_query=state.get("translated_query"),
+        )}
+
+    def answer(state):
+        return {"result": generate_answer(
+            request.query, state["final_chunks"], state["history"], request.conversation_id, db, project_id,
+            summary=state["summary"], summary_boundary=state["summary_boundary"], selection=state["selection"],
+        )}
+
+    def save(state):
+        history_query = request.query
+        if state["selection"] is not None:
+            history_query = json.dumps({"query": request.query, "selection": state["selection"]}, ensure_ascii=False)
+        result = dict(state["result"])
+        result["conversation_id"] = history_messages_control(
+            result["answer"], history_query, request.conversation_id, db, project_id,
         )
-    search_query = rewrite_query(retrieval_input, history, summary=summary)
-    translated_query = translate_query(search_query)
-    if request.document_id is not None:
-        final_chunks = search_document_first(
-            search_query, project_id, request.document_id, db, request.candidate_k_percentage,
-            doc_ids=doc_ids, translated_query=translated_query,
-        )
-    else:
-        # 原文和译文共享已校验的检索范围；翻译失败时只用原文。
-        results_vector, results_BM25 = [], []
-        for query in (search_query, translated_query):
-            if query is None:
-                continue
-            vector, bm25 = retrieve_documents(
-                query, project_id, db, request.candidate_k_percentage, doc_ids,
-            )
-            results_vector.extend(vector)
-            results_BM25.extend(bm25)
-        merged = rrf_fuse(results_vector, results_BM25)
-        final_chunks = rerank_results(search_query, translated_query, merged)
+        if state["selection"] is not None:
+            result["selection"] = state["selection"]
+        return {"result": result}
 
-    #生成回答
-    final_result = generate_answer(
-        request.query, final_chunks, history, request.conversation_id, db, project_id,
-        summary=summary,
-        summary_boundary=summary_boundary,
-        selection=selection,
-    )
-    # 保留原问题和选区，不用改写后的检索问题覆盖用户原意；复用现有消息表。
-    history_query = request.query
-    if selection is not None:
-        history_query = json.dumps({"query": request.query, "selection": selection}, ensure_ascii=False)
-    conversation_id = history_messages_control(final_result["answer"], history_query, request.conversation_id, db, project_id)
-    final_result["conversation_id"] = conversation_id
-    if selection is not None:
-        final_result["selection"] = selection
-    return final_result
+    graph = build_qa_graph({
+        "validate": validate, "history": history, "rewrite": rewrite, "translate": translate,
+        "retrieve_original": retrieve_original, "retrieve_translated": retrieve_translated,
+        "rerank": rerank, "selection_retrieve": selection_retrieve, "answer": answer, "save": save,
+    })
+    return graph.invoke({})["result"]

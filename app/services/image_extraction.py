@@ -35,8 +35,9 @@ def image_worth_describing(
 
 @timed_stage("chunk.image_index")
 def index_document_images(document: DoclingDocument) -> dict[int, PictureItem]:
-    """先扫描docling解析后md文档的图片位置：以全文 reading_order 为编号"""
+    """docling解析后被认为是图片的东西的位置：以reading_order 为编号"""
     pictures = {}
+    #document.iterate_items返回（元素，level）
     for reading_order, (item, _) in enumerate(document.iterate_items(traverse_pictures=True)):
         if isinstance(item, PictureItem):
             pictures[reading_order] = item
@@ -55,7 +56,8 @@ def extract_document_images(
 
     output_dir 应为当前文档独立的图片目录。未传索引时先扫描一次，
     传入空索引则不提取；图片提取失败也保留原编号，不给后续图片重新编号。
-    低信息图片记录为 filtered，不写入 PNG，也不发送给视觉模型。
+    低信息图片记录为 filtered，不写入 PNG；该过滤只影响留档，
+    内置图片描述已在 Docling 转换阶段执行。
     """
     started_at = perf_counter()
     output_dir = Path(output_dir)
@@ -63,11 +65,18 @@ def extract_document_images(
 
     if pictures is None:
         pictures = index_document_images(document)
+
+    #用来存每张图的信息
     records = []
+    #pictures.items()遍历字典 得到每个元素 键 值
+    #item是docling解析出的图片对象
     for reading_order, item in pictures.items():
-        #组合“文档 ID＋图片节点”生成 ID
+        #item.self_ref docling里图片身份证
+        #组合生成图片id
         image_id = uuid5(NAMESPACE_URL, f"document:{document_id}:{item.self_ref}").hex
+
         provenance = []
+        #prov位置信息,里面有页码、元素大小
         for source in item.prov:
             page = document.pages.get(source.page_no)
             provenance.append({
@@ -76,7 +85,7 @@ def extract_document_images(
                 "page_size": page.size.model_dump(mode="json") if page else None,
             })
         first_source = provenance[0] if provenance else {}
-        #reading_order 是阅读顺序编号
+
         record = {
             "image_id": image_id,
             "document_id": document_id,
@@ -90,6 +99,7 @@ def extract_document_images(
         }
         try:
             with measure_stage("chunk.image_get_pixels", reading_order=reading_order):
+                #裁图
                 image = item.get_image(document)
         except Exception as exc:
             image = None
@@ -97,6 +107,7 @@ def extract_document_images(
         if image is not None:
             record.update(width=image.width, height=image.height)
             with measure_stage("chunk.image_filter", reading_order=reading_order):
+                #过滤掉没用的图
                 worth_describing = image_worth_describing(item, document, image)
             if not worth_describing:
                 record["status"] = "filtered"
@@ -115,7 +126,7 @@ def extract_document_images(
             logger.warning("event=document_image_unavailable document_id=%s source_ref=%s error_type=%s",
                            document_id, item.self_ref, record.get("error_type", "MissingPixels"))
         records.append(record)
-
+    #给每个文件图片做登记
     manifest = {"schema_version": 1, "document_id": document_id, "images": records}
     temporary_manifest = output_dir / "manifest.json.tmp"
     with measure_stage("chunk.image_manifest_save", image_count=len(records)):

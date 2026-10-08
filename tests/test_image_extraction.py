@@ -180,13 +180,16 @@ class ImageIngestionTests(unittest.TestCase):
         cls.chunk = chunk
 
     def test_pdf_converter_retains_images_with_ocr_disabled(self):
-        with patch.object(self.chunk, "DocumentConverter") as converter:
+        with patch.dict(os.environ, {"ZHIPU_API_KEY": "test-only"}), patch.object(self.chunk, "DocumentConverter") as converter:
             self.chunk.get_document_converter.__wrapped__()
         options = converter.call_args.kwargs["format_options"][self.chunk.InputFormat.PDF].pipeline_options
         self.assertTrue(options.generate_picture_images)
         self.assertEqual(options.images_scale, 2.0)
         self.assertFalse(options.do_ocr)
-        self.assertFalse(options.do_picture_description)
+        self.assertTrue(options.do_picture_description)
+        self.assertTrue(options.enable_remote_services)
+        ppt = converter.call_args.kwargs["format_options"][self.chunk.InputFormat.PPTX].pipeline_options
+        self.assertTrue(ppt.do_picture_description)
 
     def test_real_pptx_conversion_extracts_embedded_picture(self):
         from pptx import Presentation
@@ -201,8 +204,15 @@ class ImageIngestionTests(unittest.TestCase):
         content = BytesIO()
         slides.save(content)
         content.seek(0)
-        converter = self.chunk.get_document_converter.__wrapped__()
-        result = converter.convert(self.chunk.DocumentStream(name="test.pptx", stream=content))
+        from docling.datamodel.base_models import ApiImageRequestResult, VlmStopReason
+        with patch.dict(os.environ, {"ZHIPU_API_KEY": "test-only"}), patch(
+            "docling.models.stages.picture_description.picture_description_api_model.api_image_request",
+            return_value=ApiImageRequestResult("Embedded image evidence", 5, VlmStopReason.END_OF_SEQUENCE),
+        ) as describe:
+            converter = self.chunk.get_document_converter.__wrapped__()
+            result = converter.convert(self.chunk.DocumentStream(name="test.pptx", stream=content))
+        describe.assert_called_once()
+        self.assertIn("Embedded image evidence", result.document.export_to_markdown())
         with tempfile.TemporaryDirectory() as directory:
             records = extract_document_images(result.document, 42, directory)
             self.assertEqual(len(records), 1)
@@ -217,16 +227,16 @@ class ImageIngestionTests(unittest.TestCase):
                      embedding_ms=0, parent_db_flush_ms=0)
         for filename in ("paper.pdf", "slides.pptx"):
             with self.subTest(filename=filename), tempfile.TemporaryDirectory() as directory:
-                doc, _ = sample_document()
+                from docling_core.types.doc import DescriptionMetaField, PictureMeta
+                doc, picture = sample_document()
+                picture.meta = PictureMeta(description=DescriptionMetaField(text="Image evidence", created_by="test"))
                 converter = Mock()
-                converter.convert.return_value = SimpleNamespace(document=doc)
+                converter.convert.return_value = SimpleNamespace(document=doc, status=self.chunk.ConversionStatus.SUCCESS)
                 with patch.object(self.chunk, "get_document_converter", return_value=converter), \
-                     patch.object(self.chunk, "recognize_document_images", return_value={1: "Image evidence"}) as ocr, \
                      patch.object(self.chunk, "splitter_creator", return_value=stats) as splitter:
                     self.chunk.chunking(b"fake", Mock(), 42, filename, image_output_dir=directory)
                 manifest = json.loads((Path(directory) / "manifest.json").read_text(encoding="utf-8"))
                 self.assertEqual(manifest["images"][0]["status"], "saved")
-                ocr.assert_called_once_with(manifest["images"], directory)
                 self.assertIn("Image evidence", splitter.call_args.args[0])
                 if filename.endswith(".pdf"):
                     parents = self.chunk.split_pdf_document(splitter.call_args.kwargs["pdf_document"])
@@ -237,20 +247,20 @@ class ImageIngestionTests(unittest.TestCase):
                     self.assertNotIn("Image evidence", pages[0])
                     self.assertIn("Image evidence", pages[1])
 
-    def test_ocr_failure_stops_before_chunking(self):
-        from app.services.image_ocr import ImageOCRError
+    def test_empty_builtin_description_stops_before_chunking(self):
+        from docling_core.types.doc import DescriptionMetaField, PictureMeta
 
         doc, picture = sample_document()
+        picture.meta = PictureMeta(description=DescriptionMetaField(text="", created_by="test"))
         converter = Mock()
-        converter.convert.return_value = SimpleNamespace(document=doc)
+        converter.convert.return_value = SimpleNamespace(document=doc, status=self.chunk.ConversionStatus.SUCCESS)
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(self.chunk, "get_document_converter", return_value=converter), \
-             patch.object(self.chunk, "recognize_document_images", side_effect=ImageOCRError(1, "timeout")), \
              patch.object(self.chunk, "splitter_creator") as splitter:
-            with self.assertRaises(ImageOCRError):
+            with self.assertRaisesRegex(ValueError, "图片描述为空"):
                 self.chunk.chunking(b"fake", Mock(), 42, "paper.pdf", image_output_dir=directory)
         splitter.assert_not_called()
-        self.assertIsNone(picture.meta)
+        self.assertEqual(picture.meta.description.text, "")
 
 
 if __name__ == "__main__":

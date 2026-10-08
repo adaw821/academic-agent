@@ -296,6 +296,7 @@ def rrf_fuse(
         vector_results: list[dict],
         BM25_results: list[dict]
 ):
+    """对单个查询的两路召回融合去重，按 RRF 分数降序取前 10 个。"""
     merged=[]
     for result in [vector_results, BM25_results]:
         for rank, item in enumerate(result, start=1):
@@ -319,127 +320,78 @@ def rrf_fuse(
                 reverse=True
             )
 
-    return merged
+    selected = merged[:10]
+    performance_logger.info(
+        "event=rrf_top_k merged_count=%s selected_count=%s top_k=10",
+        len(merged), len(selected),
+    )
+    return selected
 
 @timed_stage("qa.rerank")
 def rerank_results(
     original_query: str,
     translated_query: str | None,
     merged_results: list[dict],
+    translated_results: list[dict] | None = None,
 ) -> list[dict]:
-    """对子片做双查询评分，按最高子片分选择父片并返回完整父片正文。"""
-    if not merged_results:
-        performance_logger.info("event=rerank_input merged_count=0 child_count=0 pair_count=0")
-        performance_logger.info("event=rerank_output parent_count=0 fallback=false")
-        return []
-
-    # 同一子片只评分一次；同一父片下的不同子片都参与评分。
-    children = []
-    seen_child_ids = set()
-
-    for item in merged_results:
-        child_id = item["child_id"]
-
-        if child_id in seen_child_ids:
+    """各查询只评分自己的候选，跨路重复子片取最高分，再筛选父片。"""
+    scored = {}
+    pair_count = 0
+    for query_kind, query, candidates in (
+        ("original", original_query, merged_results),
+        ("translated", translated_query, translated_results or []),
+    ):
+        if not query:
             continue
-
-        seen_child_ids.add(child_id)
-        children.append(item.copy())
-
-    lengths = [len(item["child_content"]) for item in children]
-    performance_logger.info(
-        "event=rerank_input merged_count=%s child_count=%s pair_count=%s "
-        "original_query_chars=%s translated_query_chars=%s "
-        "total_child_chars=%s max_child_chars=%s avg_child_chars=%.2f batch_size=4",
-        len(merged_results), len(children), len(children) * (2 if translated_query else 1),
-        len(original_query), len(translated_query or ""),
-        sum(lengths), max(lengths), sum(lengths) / len(lengths),
-    )
-    for index, item in enumerate(children):
+        children = []
+        seen = set()
+        #去重
+        for item in candidates:
+            if item["child_id"] not in seen:
+                seen.add(item["child_id"])
+                children.append(item.copy())
+        lengths = [len(item["child_content"]) for item in children]
         performance_logger.info(
-            "event=rerank_input_item index=%s child_id=%s parent_id=%s child_chars=%s",
-            index, item["child_id"], item["parent_id"], lengths[index],
+            "event=rerank_input query_kind=%s merged_count=%s child_count=%s pair_count=%s "
+            "query_chars=%s total_child_chars=%s max_child_chars=%s avg_child_chars=%.2f batch_size=4",
+            query_kind, len(candidates), len(children), len(children), len(query),
+            sum(lengths), max(lengths, default=0), sum(lengths) / len(lengths) if lengths else 0,
         )
-
-    # 两种查询针对同一组、同一顺序的子片正文评分，不能跨子片拼分。
-    original_pairs = []
-    for item in children:
-        original_pairs.append([
-            original_query,
-            item["child_content"],
-        ])
-
-    model = get_reranker()
-
-    with measure_stage("qa.rerank_predict_original", pair_count=len(original_pairs)):
-        original_scores = model.predict(
-            original_pairs,
-            batch_size=4,
-            activation_fn=Sigmoid(),
-        )
-
-    translated_scores = None
-    if translated_query:
-        translated_pairs = [
-            [translated_query, item["child_content"]] for item in children
-        ]
-        with measure_stage("qa.rerank_predict_translated", pair_count=len(translated_pairs)):
-            translated_scores = model.predict(
-                translated_pairs,
-                batch_size=4,
-                activation_fn=Sigmoid(),
+        for index, item in enumerate(children):
+            performance_logger.info(
+                "event=rerank_input_item query_kind=%s index=%s child_id=%s parent_id=%s child_chars=%s",
+                query_kind, index, item["child_id"], item["parent_id"], lengths[index],
             )
-
-    if len(original_scores) != len(children):
-        raise RuntimeError("原问题重排分数数量与子片数量不一致")
-    if translated_scores is not None and len(translated_scores) != len(children):
-        raise RuntimeError("译文重排分数数量与子片数量不一致")
-
-    for index, item in enumerate(children, start=0):
-        original_rerank_score = float(original_scores[index])
-        item["original_rerank_score"]=original_rerank_score
-        if translated_scores is not None:
-            translated_rerank_score = float(translated_scores[index])
-        else:
-            translated_rerank_score = None
-        item["translated_rerank_score"] = translated_rerank_score
-
-        item["mean_score"] = (
-            (original_rerank_score + translated_rerank_score) / 2
-            if translated_rerank_score is not None
-            else original_rerank_score
+        if not children:
+            continue
+        model = get_reranker()
+        pairs = [[query, item["child_content"]] for item in children]
+        with measure_stage(f"qa.rerank_predict_{query_kind}", pair_count=len(pairs)):
+            scores = model.predict(pairs, batch_size=4, activation_fn=Sigmoid())
+        if len(scores) != len(children):
+            raise RuntimeError(f"{query_kind} 重排分数数量与子片数量不一致")
+        pair_count += len(pairs)
+        for item, raw_score in zip(children, scores):
+            score = float(raw_score)
+            item.update(total_score=score, score_mode=query_kind)
+            previous = scored.get(item["child_id"])
+            if previous is None or score > previous["total_score"]:
+                scored[item["child_id"]] = item
+        performance_logger.info(
+            "event=rerank_route_output query_kind=%s scored_child_count=%s",
+            query_kind, len(children),
         )
-        item["max_score"] = (
-            max(original_rerank_score, translated_rerank_score)
-            if translated_rerank_score is not None
-            else original_rerank_score
-        )
-        item["weighted_score"] = (
-            0.75 * item["max_score"] + 0.25 * min(original_rerank_score, translated_rerank_score)
-            if translated_rerank_score is not None
-            else original_rerank_score
-        )
-        item["total_score"] = item["weighted_score"]
-        item["score_mode"] = "weighted" if translated_rerank_score is not None else "original"
 
-    results = chunk_filter(children)
-    fallback = not results and translated_scores is not None
-    if fallback:
-        # 加权分全部未过线时，复用所有子片的两路分数，按最大值重新选父片。
-        fallback_children = [
-            {**item, "total_score": item["max_score"], "score_mode": "max_fallback"}
-            for item in children
-        ]
-        results = chunk_filter(fallback_children)
+    results = chunk_filter(list(scored.values()))
     performance_logger.info(
-        "event=rerank_output scored_child_count=%s parent_count=%s fallback=%s",
-        len(children), len(results), str(fallback).lower(),
+        "event=rerank_output pair_count=%s scored_child_count=%s parent_count=%s",
+        pair_count, len(scored), len(results),
     )
     for index, item in enumerate(results):
         performance_logger.info(
             "event=rerank_output_item index=%s child_id=%s parent_id=%s "
-            "child_chars=%s parent_chars=%s",
-            index, item["child_id"], item["parent_id"],
+            "query_kind=%s child_chars=%s parent_chars=%s",
+            index, item["child_id"], item["parent_id"], item["score_mode"],
             len(item["child_content"]), len(item.get("parent_content", "")),
         )
     return results
@@ -492,17 +444,21 @@ def search_document_first(
         {"document_id": document_id},
         {"exclude_document_id": document_id},
     ):
-        vector_results, bm25_results = [], []
-        for retrieval_query in (query, translated_query):
+        candidates = {"original": [], "translated": []}
+        for query_kind, retrieval_query in (("original", query), ("translated", translated_query)):
             if retrieval_query is None:
                 continue
-            vector_results.extend(search_vector(
+            vector_results = search_vector(
                 retrieval_query, project_id, db, candidate_k_percentage, doc_ids=doc_ids, **scope,
-            ))
-            bm25_results.extend(search_bm25(
+            )
+            bm25_results = search_bm25(
                 retrieval_query, project_id, db, candidate_k_percentage, doc_ids=doc_ids, **scope,
-            ))
-        groups.append(rerank_results(query, translated_query, rrf_fuse(vector_results, bm25_results)))
+            )
+            with measure_stage("qa.rrf_per_query", query_kind=query_kind, **scope):
+                candidates[query_kind] = rrf_fuse(vector_results, bm25_results)
+        groups.append(rerank_results(
+            query, translated_query, candidates["original"], candidates["translated"],
+        ))
 
     current, others = groups
     # 只在通过重排阈值的父片中分配名额：当前文档优先 3 片，总计最多 5 片。

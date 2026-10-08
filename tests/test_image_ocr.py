@@ -36,6 +36,7 @@ class ImageOCRTests(unittest.TestCase):
             {"reading_order": 2, "image_path": "2.png", "status": "saved"},
         ]
         self.enterContext(patch.dict(os.environ, {"ZHIPU_API_KEY": "unused-test-key"}))
+        self.sleep = self.enterContext(patch.object(image_ocr, "sleep"))
 
     def mock_client(self, handler):
         client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -52,7 +53,7 @@ class ImageOCRTests(unittest.TestCase):
             self.assertEqual(request.method, "POST")
             self.assertEqual(request.headers["Authorization"], "Bearer unused-test-key")
             payload = json.loads(request.content)
-            self.assertEqual(payload["model"], "glm-4.1v-thinking-flash")
+            self.assertEqual(payload["model"], "glm-4.6v-flash")
             self.assertFalse(payload["stream"])
             self.assertEqual(len(payload["messages"]), 1)
             message = payload["messages"][0]
@@ -76,6 +77,49 @@ class ImageOCRTests(unittest.TestCase):
             ]):
                 self.assertEqual(image_ocr.recognize_document_images(records, self.directory), {})
             client.assert_not_called()
+
+    def test_rate_limit_retries_same_picture_then_succeeds(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            if len(requests) == 1:
+                return httpx.Response(429, headers={"Retry-After": "5"})
+            return httpx.Response(200, json=completion("recognized"))
+
+        self.mock_client(handler)
+        self.assertEqual(image_ocr.recognize_document_images(self.records[:1], self.directory), {7: "recognized"})
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0].content, requests[1].content)
+        self.sleep.assert_called_once_with(5)
+
+    def test_persistent_rate_limit_is_bounded_and_releases_lock(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(429)
+
+        self.mock_client(handler)
+        with self.assertRaisesRegex(image_ocr.ImageOCRError, "HTTP 429"):
+            image_ocr.recognize_document_images(self.records[:1], self.directory)
+        self.assertEqual(len(requests), 4)
+        self.assertEqual([call.args[0] for call in self.sleep.call_args_list], [2, 4, 8])
+        self.assertTrue(image_ocr._request_lock.acquire(blocking=False))
+        image_ocr._request_lock.release()
+
+    def test_long_retry_after_fails_without_retrying_early(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(429, headers={"Retry-After": "120"})
+
+        self.mock_client(handler)
+        with self.assertRaisesRegex(image_ocr.ImageOCRError, "HTTP 429"):
+            image_ocr.recognize_document_images(self.records[:1], self.directory)
+        self.assertEqual(len(requests), 1)
+        self.sleep.assert_not_called()
 
     def test_missing_credentials_fails_before_request(self):
         with patch.dict(os.environ, {"ZHIPU_API_KEY": ""}), patch.object(image_ocr.httpx, "Client") as client:

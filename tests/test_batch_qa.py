@@ -71,6 +71,58 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(len((output / "results.jsonl").read_text(encoding="utf-8").splitlines()), 2)
         self.assertNotIn("not-a-real-password", (output / "report.md").read_text(encoding="utf-8"))
 
+    def test_frozen_questions_keep_references_out_of_requests(self):
+        source = self.root / "frozen.md"
+        source.write_text('''# Q round
+## Q01 — fact ｜ doc: lecture
+**问题**：what is SQL?
+**参考答案**：local reference only
+
+---
+## Q02 — unsupported
+**问题**：what is missing?
+**参考答案**：insufficient evidence
+''', encoding="utf-8")
+        questions = batch.read_questions(source)
+        self.assertEqual([q["id"] for q in questions], ["Q01", "Q02"])
+        self.assertEqual(questions[0]["reference"], "local reference only")
+        asked = []
+        def handler(request):
+            if request.url.path.endswith("/login"):
+                return self.login_response()
+            body = json.loads(request.content)
+            self.assertEqual(set(body), {"query", "candidate_k_percentage", "conversation_id"})
+            self.assertIsNone(body["conversation_id"])
+            asked.append(body["query"])
+            return httpx.Response(200, json={"answer": "answer", "sources": [], "retrieved_contexts": ["evidence"]})
+        batch.ask_questions(self.api(handler), 14, questions, 0.4, self.root)
+        self.assertEqual(asked, [q["query"] for q in questions])
+        samples = [json.loads(line) for line in (self.root / "ragas.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(samples[0], dict(user_input="what is SQL?", response="answer",
+                                        retrieved_contexts=["evidence"], reference="local reference only"))
+
+    def test_frozen_question_without_body_is_not_silently_skipped(self):
+        source = self.root / "invalid.md"
+        source.write_text("## Q01 — fact\n**参考答案**：not a question\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "缺少问题正文"):
+            batch.read_questions(source)
+
+    def test_existing_corpus_requires_ready_documents_and_never_uploads(self):
+        for docs in ([], [dict(id=1, filename="test.pdf", status="processing")],
+                     [dict(id=1, filename="test.pdf", status="failed")],
+                     [dict(id=1, filename="test.pdf", status="completed")]):
+            def handler(request):
+                if request.url.path.endswith("/login"):
+                    return self.login_response()
+                self.assertEqual(request.method, "GET")
+                return httpx.Response(200, json=docs)
+            api = self.api(handler)
+            if docs and docs[0]["status"] == "completed":
+                self.assertEqual(batch.existing_corpus(api, 14)[0]["document_id"], 1)
+            else:
+                with self.assertRaises(RuntimeError):
+                    batch.existing_corpus(api, 14)
+
     def test_failed_parse_blocks_questions(self):
         api = self.api(lambda request: self.login_response() if request.url.path.endswith("/login") else
                        httpx.Response(200, json=[dict(id=1, filename="failed.pdf", status="failed")]))
