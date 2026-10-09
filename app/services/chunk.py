@@ -13,8 +13,9 @@ from sqlalchemy.orm import Session
 
 from app.models.document_child import Child
 from app.models.document_parents import Parent
-from app.services.image_extraction import extract_document_images, index_document_images
-from app.services.docling_images import picture_description_options, validate_picture_descriptions
+from app.services.images_routers import vlm_router, ocr_process, is_enough_text, get_ocr_error_predictor, route_ocr_result
+from app.services.docling_images import enrich_routed_images
+from app.services.image_extraction import extract_document_images
 from app.services.pdf_chunking import split_pdf_document
 from app.services.ppt_chunking import PPT_CHILD_SIZE, clean_slide_text, split_slide_text
 from app.services.performance import measure_stage, timed_stage, logger as performance_logger
@@ -22,7 +23,6 @@ from app.services.workflow_graphs import build_document_graph
 
 
 logger = logging.getLogger("uvicorn.error")
-
 
 @lru_cache
 @timed_stage("chunk.embedding_model_load")
@@ -41,15 +41,15 @@ def get_embedding_model():
 @timed_stage("chunk.converter_initialize")
 def get_document_converter():
     started_at = perf_counter()
-    # PDF 文字层照常提取；图片转录由 Docling 内置视觉描述完成，整页 OCR 暂不启用。
+    # PDF,ppt文字层照常提取；ocr不启用 只要图片分类结果
     pdf_options = PdfPipelineOptions(
         do_ocr=False, generate_picture_images=True, images_scale=2.0,
-        enable_remote_services=True, do_picture_description=True,
-        picture_description_options=picture_description_options(),
+        do_picture_description=False,
+        do_picture_classification=True,
     )
     ppt_options = ConvertPipelineOptions(
-        enable_remote_services=True, do_picture_description=True,
-        picture_description_options=picture_description_options(),
+        do_picture_description=False,
+        do_picture_classification=True,
     )
     converter = DocumentConverter(format_options={
         InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options),
@@ -85,7 +85,7 @@ def chunking(
         with measure_stage("chunk.txt_decode", size_bytes=len(content)):
             return {"text": content.decode("utf-8-sig").strip()}
 
-    #将pdf和ppt用docling解析
+    #将pdf和ppt用docling解析,得到类型
     def convert(state):
         source = DocumentStream(name=file_name, stream=BytesIO(content))
         with measure_stage("chunk.converter_get"):
@@ -94,21 +94,79 @@ def chunking(
             result = converter.convert(source)
         if result.status != ConversionStatus.SUCCESS:
             raise ValueError(f"Docling 文档转换未完整成功：{result.status}")
-        validate_picture_descriptions(result.document)
         return {"document": result.document}
 
-    #处理图片
+
+    @timed_stage("chunk.image_index")
     def extract_images(state):
-        # 描述已由 Docling 回填，此处只保存图片和位置以便检查。
-        pictures = index_document_images(state["document"])
+        """提取所有pictureitem的类型 类型置信度 id作为唯一标识 图片地址"""
+        document = state["document"]
+        classifications = []
+        for item in document.pictures:
+            if item is None:
+                continue
+            classification = item.meta.classification if item.meta else None
+            prediction = (
+                classification.get_main_prediction()
+                if classification and classification.predictions else None
+            )
+            classifications.append({
+            "type": prediction.class_name if prediction else None,
+            "id": item.self_ref,
+            "confidence": prediction.confidence if prediction else None,
+            "router": None,
+            })
+        update = {"classifications": classifications}
+        if image_output_dir is not None:
+            update["image_records"] = extract_document_images(document, document_id, image_output_dir)
+        return update
 
-        records = extract_document_images(
-            state["document"], document_id, image_output_dir, pictures=pictures,
+    def images_type_router(state):
+        """给images分流"""
+        classifications = [dict(item) for item in (state["classifications"] or [])]
+        document = state["document"]
+        #先分一部分图给vlm
+        _, others = vlm_router(classifications)
+        #剩下的图做ocr 准备进一步分流
+        ocr_results = ocr_process(others, document)
+        #计算文字量
+        ocr_units_results = is_enough_text(ocr_results)
+        quality_candidates = []
+        for record in ocr_units_results:
+            route = route_ocr_result(record)
+            if route == "quality":
+                quality_candidates.append(record)
+            else:
+                record["router"] = route
+
+        if quality_candidates:
+            predictor = get_ocr_error_predictor()
+            with measure_stage("chunk.ocr_quality_batch", image_count=len(quality_candidates)):
+                quality = predictor([item["text"] for item in quality_candidates])
+            if len(quality.labels) != len(quality_candidates):
+                raise ValueError("OCR 质量检查返回数量与图片数量不一致")
+            for item, label in zip(quality_candidates, quality.labels):
+                item["ocr_quality"] = label
+                item["router"] = "ocr" if label == "good" else "vlm"
+
+        performance_logger.info(
+            "event=picture_routes total=%s ocr=%s vlm=%s skip=%s quality_checked=%s",
+            len(classifications),
+            sum(item["router"] == "ocr" for item in classifications),
+            sum(item["router"] == "vlm" for item in classifications),
+            sum(item["router"] == "skip" for item in classifications),
+            len(quality_candidates),
         )
-        return {"pictures": pictures, "image_records": records}
 
-    #把 Docling document 变成 md文本
-    def export(state):
+        return {"classifications": classifications}
+
+    def enrich_images(state):
+        document = state["document"]
+        classifications = enrich_routed_images(document, state["classifications"])
+        return {"document": document, "classifications": classifications}
+
+    def document_md(state):
+        """把文件转成md"""
         document = state["document"]
         if is_paged:
             if not document.pages:
@@ -146,11 +204,13 @@ def chunking(
     #把前边函数总体跑一遍
     nodes = {
         "decode": decode, "convert": convert, "extract_images": extract_images,
-        "export": export,
+        "images_type_router": images_type_router,
+        "enrich_images": enrich_images,
+        "export": document_md,
         "split_embed_store": split_embed_store,
     }
     graph = build_document_graph(nodes, is_txt=is_txt,
-                                 needs_images=is_paged and image_output_dir is not None)
+                                 needs_images=is_paged)
     state = graph.invoke({})
     stats, parse_ms = state["stats"], state["parse_ms"]
 

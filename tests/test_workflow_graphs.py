@@ -49,9 +49,11 @@ class WorkflowGraphTests(unittest.TestCase):
         for txt, images, saved, failure, expected in (
             (True, False, False, None, ["decode", "split_embed_store"]),
             (False, False, False, None, ["convert", "export", "split_embed_store"]),
-            (False, True, False, None, ["convert", "extract_images", "export", "split_embed_store"]),
-            (False, True, True, None, ["convert", "extract_images", "export", "split_embed_store"]),
+            (False, True, False, None, ["convert", "extract_images", "images_type_router", "enrich_images", "export", "split_embed_store"]),
+            (False, True, True, None, ["convert", "extract_images", "images_type_router", "enrich_images", "export", "split_embed_store"]),
             (False, True, True, "convert", ["convert"]),
+            (False, True, True, "images_type_router", ["convert", "extract_images", "images_type_router"]),
+            (False, True, True, "enrich_images", ["convert", "extract_images", "images_type_router", "enrich_images"]),
         ):
             calls = []
             def node(name):
@@ -61,7 +63,7 @@ class WorkflowGraphTests(unittest.TestCase):
                         raise ValueError("OCR failed")
                     return {"image_records": [{"status": "saved" if saved else "filtered"}]} if name == "extract_images" else {}
                 return run
-            names = ["decode", "convert", "extract_images", "export", "split_embed_store"]
+            names = ["decode", "convert", "extract_images", "images_type_router", "enrich_images", "export", "split_embed_store"]
             graph = build_document_graph({name: node(name) for name in names}, is_txt=txt, needs_images=images)
             if failure:
                 with self.assertRaises(ValueError):
@@ -69,6 +71,26 @@ class WorkflowGraphTests(unittest.TestCase):
             else:
                 graph.invoke({})
             self.assertEqual(calls, expected)
+
+    def test_picture_routing_state_reaches_export(self):
+        for classifications in ([], [{"id": "#/pictures/0", "router": None}]):
+            def route(state):
+                self.assertEqual(state["classifications"], classifications)
+                return {"classifications": [dict(item, router="ocr") for item in state["classifications"]]}
+
+            def export(state):
+                self.assertEqual(state["classifications"], [dict(item, router="ocr") for item in classifications])
+                return {"text": "exported"}
+
+            nodes = {
+                "decode": lambda state: {}, "convert": lambda state: {},
+                "extract_images": lambda state: {"classifications": classifications},
+                "images_type_router": route, "export": export,
+                "enrich_images": lambda state: {},
+                "split_embed_store": lambda state: {},
+            }
+            result = build_document_graph(nodes, is_txt=False, needs_images=True).invoke({})
+            self.assertEqual(result["text"], "exported")
 
 
 if __name__ == "__main__":

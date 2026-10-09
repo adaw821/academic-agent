@@ -34,6 +34,7 @@ class DocumentState(TypedDict, total=False):
     pdf_document: Any
     parse_ms: float
     stats: dict
+    classifications: list[dict] | None
 
 
 def build_qa_graph(nodes):
@@ -66,7 +67,9 @@ def build_document_graph(nodes, *, is_txt, needs_images):
     graph.add_conditional_edges("convert", lambda state: (
         "extract_images" if needs_images else "export"
     ), ["extract_images", "export"])
-    graph.add_edge("extract_images", "export")
+    graph.add_edge("extract_images", "images_type_router")
+    graph.add_edge("images_type_router", "enrich_images")
+    graph.add_edge("enrich_images", "export")
     graph.add_edge("export", "split_embed_store")
     graph.add_edge("split_embed_store", END)
     return graph.compile()

@@ -34,16 +34,22 @@ flowchart TD
 ```mermaid
 flowchart TD
     START -->|TXT| decode[文本解码]
-    START -->|其他格式| convert[Docling 转换，PDF/PPT 内置图片描述]
-    convert -->|PDF/PPT 且有图片输出目录| extract[提取与过滤图片]
+    START -->|其他格式| convert[Docling 转换，PDF/PPT 图片分类]
+    convert -->|PDF/PPT| extract[提取图片分类信息，可选图片留档]
     convert -->|其他情况| export[按格式导出正文]
-    extract --> export
+    extract --> route[按类型、OCR 文字量和质量分流]
+    route --> enrich[选择性 VLM 描述与 OCR 文字回填]
+    enrich --> export
     decode --> split[父子分片、向量化、暂存数据库]
     export --> split
     split --> END
 ```
 
-后台任务仍负责文件读取、状态更新和最终事务提交。图中任一节点失败，会沿原有处理逻辑回滚分片并将文档标记为 failed。图片描述在 Docling 转换内部完成，使用内置 API 并发配置和重试；不再运行独立的 `ocr`、`enrich_images` 节点。详见 [图片描述实验](docling-picture-description.md)。
+后台任务仍负责文件读取、状态更新和最终事务提交。图中任一节点失败，会沿原有处理逻辑回滚分片并将文档标记为 failed。转换阶段关闭图片描述；`images_type_router` 使用 RapidOCR、文字量和 Surya 质量检查决定 `ocr`、`vlm` 或 `skip`。文字量沿用中文字符数加英文单词/数字串数：≤5 为极少，6–20 为短文本，>20 为长文本；OCR 逐行平均置信度需 >0.8，长文本还需 Surya 返回 `good`。
+
+`enrich_images` 只对 `vlm` 图片调用 GLM，保留 Docling 图片描述与元数据封装，请求层由 `picture_api.py` 保留 HTTP 状态码和服务端错误码；仅此分支需要 `ZHIPU_API_KEY`。同一进程中的 VLM 请求串行执行，429、临时服务错误和网络异常最多尝试 4 次，退避间隔为 5/10/20 秒；遵守 `Retry-After`，超过 60 秒则停止本次尝试，不提前重试。认证等非临时错误立即失败。
+
+OCR/VLM 文本写回原 `PictureItem.meta.description`，再导出并分片；`skip` 保留原图片节点。长度截断时仅对当前图片将输出上限提高至 32768 重试一次；持续截断、缺少图片像素、空描述或内容过滤仍会报错，不会作为成功内容入库。日志记录图片 ID、页码、结束原因、HTTP 状态和 API 错误码，不记录图片数据、正文或密钥。RapidOCR 和 Surya 按需加载并缓存，当前环境的 Surya 使用进程内预测器。
 
 ## 代码位置与日志
 

@@ -180,16 +180,17 @@ class ImageIngestionTests(unittest.TestCase):
         cls.chunk = chunk
 
     def test_pdf_converter_retains_images_with_ocr_disabled(self):
-        with patch.dict(os.environ, {"ZHIPU_API_KEY": "test-only"}), patch.object(self.chunk, "DocumentConverter") as converter:
+        with patch.dict(os.environ, {"ZHIPU_API_KEY": ""}), patch.object(self.chunk, "DocumentConverter") as converter:
             self.chunk.get_document_converter.__wrapped__()
         options = converter.call_args.kwargs["format_options"][self.chunk.InputFormat.PDF].pipeline_options
         self.assertTrue(options.generate_picture_images)
         self.assertEqual(options.images_scale, 2.0)
         self.assertFalse(options.do_ocr)
-        self.assertTrue(options.do_picture_description)
-        self.assertTrue(options.enable_remote_services)
+        self.assertFalse(options.do_picture_description)
+        self.assertTrue(options.do_picture_classification)
         ppt = converter.call_args.kwargs["format_options"][self.chunk.InputFormat.PPTX].pipeline_options
-        self.assertTrue(ppt.do_picture_description)
+        self.assertFalse(ppt.do_picture_description)
+        self.assertTrue(ppt.do_picture_classification)
 
     def test_real_pptx_conversion_extracts_embedded_picture(self):
         from pptx import Presentation
@@ -206,11 +207,17 @@ class ImageIngestionTests(unittest.TestCase):
         content.seek(0)
         from docling.datamodel.base_models import ApiImageRequestResult, VlmStopReason
         with patch.dict(os.environ, {"ZHIPU_API_KEY": "test-only"}), patch(
-            "docling.models.stages.picture_description.picture_description_api_model.api_image_request",
+            "app.services.docling_images.request_picture_description",
             return_value=ApiImageRequestResult("Embedded image evidence", 5, VlmStopReason.END_OF_SEQUENCE),
         ) as describe:
             converter = self.chunk.get_document_converter.__wrapped__()
+            # This test exercises the real PPT backend, without classifier downloads.
+            converter.format_to_options[self.chunk.InputFormat.PPTX].pipeline_options.do_picture_classification = False
             result = converter.convert(self.chunk.DocumentStream(name="test.pptx", stream=content))
+            describe.assert_not_called()
+            self.chunk.enrich_routed_images(result.document, [
+                {"id": item.self_ref, "router": "vlm"} for item in result.document.pictures
+            ])
         describe.assert_called_once()
         self.assertIn("Embedded image evidence", result.document.export_to_markdown())
         with tempfile.TemporaryDirectory() as directory:
@@ -232,7 +239,10 @@ class ImageIngestionTests(unittest.TestCase):
                 picture.meta = PictureMeta(description=DescriptionMetaField(text="Image evidence", created_by="test"))
                 converter = Mock()
                 converter.convert.return_value = SimpleNamespace(document=doc, status=self.chunk.ConversionStatus.SUCCESS)
-                with patch.object(self.chunk, "get_document_converter", return_value=converter), \
+                from app.services import images_routers
+                ocr = Mock(return_value=SimpleNamespace(txts=["Image evidence from this picture is readable"], scores=[.95]))
+                with patch.object(images_routers, "get_ocr_engine", return_value=ocr), \
+                     patch.object(self.chunk, "get_document_converter", return_value=converter), \
                      patch.object(self.chunk, "splitter_creator", return_value=stats) as splitter:
                     self.chunk.chunking(b"fake", Mock(), 42, filename, image_output_dir=directory)
                 manifest = json.loads((Path(directory) / "manifest.json").read_text(encoding="utf-8"))
@@ -240,7 +250,7 @@ class ImageIngestionTests(unittest.TestCase):
                 self.assertIn("Image evidence", splitter.call_args.args[0])
                 if filename.endswith(".pdf"):
                     parents = self.chunk.split_pdf_document(splitter.call_args.kwargs["pdf_document"])
-                    self.assertEqual(parents[-1].children[0].text, "Image evidence")
+                    self.assertEqual(parents[-1].children[0].text, "Image evidence from this picture is readable")
                     self.assertEqual(parents[-1].children[0].page_numbers, [2])
                 else:
                     pages = splitter.call_args.kwargs["page_texts"]
@@ -254,7 +264,14 @@ class ImageIngestionTests(unittest.TestCase):
         picture.meta = PictureMeta(description=DescriptionMetaField(text="", created_by="test"))
         converter = Mock()
         converter.convert.return_value = SimpleNamespace(document=doc, status=self.chunk.ConversionStatus.SUCCESS)
+        from app.services import images_routers
+        from docling.datamodel.base_models import ApiImageRequestResult, VlmStopReason
+        ocr = Mock(return_value=SimpleNamespace(txts=[], scores=[]))
         with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {"ZHIPU_API_KEY": "test-only"}), \
+             patch.object(images_routers, "get_ocr_engine", return_value=ocr), \
+             patch("app.services.docling_images.request_picture_description",
+                   return_value=ApiImageRequestResult("", 0, VlmStopReason.END_OF_SEQUENCE)), \
              patch.object(self.chunk, "get_document_converter", return_value=converter), \
              patch.object(self.chunk, "splitter_creator") as splitter:
             with self.assertRaisesRegex(ValueError, "图片描述为空"):
