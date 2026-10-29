@@ -199,6 +199,52 @@ function openCitation(citation: Source, text?: string) {
   source.value = { source: citation, text: text || '未返回原文片段' }
   mobileDocs.value = true
 }
+interface CitationGroup {
+  filename: string
+  items: { citation: Source; text: string }[]
+}
+function citationGroups(turn: Turn): CitationGroup[] {
+  const result = turn.result
+  if (!result) return []
+  const groups = new Map<number, CitationGroup>()
+  result.sources.forEach((citation, i) => {
+    const text = result.retrieved_contexts[i] || ''
+    let group = groups.get(citation.document_id)
+    if (!group) {
+      group = { filename: citation.filename, items: [] }
+      groups.set(citation.document_id, group)
+    }
+    group.items.push({ citation, text })
+  })
+  return [...groups.values()]
+}
+function openCitationGroup(group: CitationGroup) {
+  const text = group.items
+    .map((item) => item.text)
+    .filter(Boolean)
+    .join('\n\n—— 同一文档的另一片段 ——\n\n')
+  openCitation(group.items[0].citation, text || '未返回原文片段')
+}
+const activeTurn = ref(0)
+function turnPreview(question: string) {
+  const text = question.replace(/\s+/g, ' ').trim()
+  return text.length > 20 ? text.slice(0, 20) + '…' : text
+}
+function scrollToTurn(index: number) {
+  activeTurn.value = index
+  document.getElementById(`turn-${index}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+function onChatScroll(e: Event) {
+  const container = e.target as HTMLElement
+  const containerTop = container.getBoundingClientRect().top
+  const count = currentChat.value?.turns.length ?? 0
+  let current = 0
+  for (let i = 0; i < count; i++) {
+    const el = document.getElementById(`turn-${i}`)
+    if (el && el.getBoundingClientRect().top - containerTop <= 80) current = i
+  }
+  activeTurn.value = current
+}
 function askFromSource() {
   if (!source.value) return
   excerptDocument.value = source.value.source.document_id
@@ -223,6 +269,8 @@ function resetSession() {
   wakeAsk?.()
   asking.value = false
   activityOpen.value = false
+  error.value = ''
+  notice.value = ''
   schoolTools.value = false
   allowSync.value = false
   allowActions.value = false
@@ -292,6 +340,7 @@ async function authenticate() {
     connection.value = 'online'
     modal.value = null
     error.value = ''
+    notice.value = ''
     await loadProjects()
   } catch (e) {
     modalError.value = e instanceof Error ? e.message : '登录失败'
@@ -363,6 +412,7 @@ watch(activeId, (id) => {
   historyRequest++
   historyLoading.value = false
   activityOpen.value = false
+  activeTurn.value = 0
   clearTimeout(pollTimer)
   docRequest++
   documents.value = []
@@ -375,6 +425,7 @@ watch(activeId, (id) => {
   if (id) {
     chats.value[id] ??= { turns: [] }
     void loadDocuments(id)
+    if (!chats.value[id].turns.length) void loadLatestConversation(id)
   }
 })
 function chooseProject(id: number) {
@@ -560,6 +611,18 @@ async function openConversation(conversationId: number) {
 }
 function imported(projectId: number) {
   if (projectId === activeId.value) void loadDocuments(projectId)
+}
+async function loadLatestConversation(id: number) {
+  const version = sessionVersion
+  try {
+    const result = await request<PageResult<{ id: number }>>(
+      `/projects/${id}/conversations?limit=1&offset=0`,
+    )
+    if (version !== sessionVersion || id !== activeId.value) return
+    if (result.items.length) await openConversation(result.items[0].id)
+  } catch {
+    // 后台预载失败时保持欢迎页，不打断进入项目
+  }
 }
 function newChat() {
   if (activeId.value && !asking.value && !historyLoading.value) {
@@ -791,7 +854,22 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="chat-scroll">
+          <nav
+            v-if="currentChat && currentChat.turns.length > 1"
+            class="turn-dots"
+            aria-label="对话导航"
+          >
+            <span
+              v-for="(turn, index) in currentChat.turns"
+              :key="index"
+              class="turn-dot-wrap"
+              @click="scrollToTurn(index)"
+            >
+              <i class="turn-dot" :class="{ active: index === activeTurn }"></i>
+              <span class="turn-dot-tip" role="tooltip">{{ turnPreview(turn.question) }}</span>
+            </span>
+          </nav>
+          <div class="chat-scroll" @scroll.passive="onChatScroll">
             <ProjectActivity
               v-if="activityOpen && activeId && user"
               :key="`${user.id}:${activeId}`"
@@ -840,7 +918,12 @@ onUnmounted(() => {
               <p class="welcome-footnote"><span></span>基于你的资料回答 · 引用来源清晰可查</p>
             </section>
             <section v-else class="messages" aria-label="研究对话" aria-live="polite">
-              <article v-for="(turn, index) in currentChat.turns" :key="index" class="turn">
+              <article
+                v-for="(turn, index) in currentChat.turns"
+                :id="`turn-${index}`"
+                :key="index"
+                class="turn"
+              >
                 <div class="question">
                   <span class="message-avatar">{{ user?.username.slice(0, 1) }}</span>
                   <div>
@@ -873,12 +956,13 @@ onUnmounted(() => {
                     </p>
                     <div v-if="turn.result?.sources.length" class="source-chips">
                       <button
-                        v-for="(citation, i) in turn.result.sources"
-                        :key="citation.index"
-                        @click="openCitation(citation, turn.result!.retrieved_contexts[i])"
+                        v-for="group in citationGroups(turn)"
+                        :key="group.items[0].citation.index"
+                        @click="openCitationGroup(group)"
                       >
-                        <span>{{ citation.index }}</span
-                        ><FileText :size="13" />{{ citation.filename }}
+                        <span>{{ group.items[0].citation.index }}</span
+                        ><FileText :size="13" />{{ group.filename
+                        }}<em v-if="group.items.length > 1">×{{ group.items.length }}</em>
                       </button>
                     </div>
                   </div>
@@ -933,7 +1017,15 @@ onUnmounted(() => {
                   v-model="durableAsk"
                   type="checkbox"
                   :disabled="asking"
-                />后台问答（支持恢复）</label
+                />后台问答（支持恢复）<span
+                  class="hint-wrap"
+                  tabindex="0"
+                  aria-label="后台问答说明"
+                  @click.prevent
+                  ><CircleHelp :size="13" /><span class="hint-pop" role="tooltip"
+                    >勾选后，提问会作为后台任务执行：可以切换页面或刷新，任务继续运行，稍后从「历史与任务」找回结果。适合耗时较长的问题。</span
+                  ></span
+                ></label
               >
               <small v-if="schoolTools"
                 >仅按本轮明确要求执行；选定文档或附带原文时优先文档问答。开启同步后，本地未找到的课程会到学校发现，唯一匹配后首次导入。</small

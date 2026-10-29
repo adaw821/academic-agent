@@ -424,6 +424,7 @@ textarea {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
   background: #fdfefb;
   background-image: radial-gradient(ellipse at 50% 40%, #f2f5eb66, transparent 70%);
 }
@@ -1155,6 +1156,107 @@ textarea {
 .source-chips button > span {
   font-size: 9px;
   color: #5a7a47;
+}
+.source-chips button > em {
+  font-style: normal;
+  font-size: 9px;
+  color: #5a7a47;
+  margin-left: 2px;
+}
+.hint-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+  cursor: help;
+  margin-left: 2px;
+}
+.hint-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 210px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--soft);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 14px rgba(38, 51, 47, 0.1);
+  color: #26332f;
+  font-size: 12px;
+  line-height: 1.6;
+  font-weight: 400;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+  z-index: 60;
+}
+.hint-wrap:hover .hint-pop,
+.hint-wrap:focus-within .hint-pop {
+  opacity: 1;
+  visibility: visible;
+}
+.turn-dots {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 20;
+}
+.turn-dot-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 4px;
+  cursor: pointer;
+}
+.turn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ccd8cc;
+  transition:
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+.turn-dot.active {
+  background: #6e8a7d;
+  transform: scale(1.3);
+}
+.turn-dot-tip {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  max-width: 240px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--soft);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 14px rgba(38, 51, 47, 0.1);
+  color: #26332f;
+  font-size: 12px;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+  z-index: 60;
+}
+.turn-dot-wrap:hover .turn-dot-tip {
+  opacity: 1;
+  visibility: visible;
+}
+@media (max-width: 900px) {
+  .turn-dots {
+    display: none;
+  }
 }
 .thinking {
   display: flex;
