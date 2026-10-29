@@ -1,10 +1,12 @@
-from sqlalchemy import ForeignKey, Integer, String
+from sqlalchemy import ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
 
 class Document(Base):
     __tablename__ = "documents"
+
+    parsed_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     id: Mapped[int] = mapped_column(
         Integer,

@@ -179,13 +179,14 @@ class ImageIngestionTests(unittest.TestCase):
             from app.services import chunk
         cls.chunk = chunk
 
-    def test_pdf_converter_retains_images_with_ocr_disabled(self):
+    def test_pdf_converter_retains_images_with_scan_ocr(self):
         with patch.dict(os.environ, {"ZHIPU_API_KEY": ""}), patch.object(self.chunk, "DocumentConverter") as converter:
             self.chunk.get_document_converter.__wrapped__()
         options = converter.call_args.kwargs["format_options"][self.chunk.InputFormat.PDF].pipeline_options
         self.assertTrue(options.generate_picture_images)
         self.assertEqual(options.images_scale, 2.0)
-        self.assertFalse(options.do_ocr)
+        self.assertTrue(options.do_ocr)
+        self.assertIsInstance(options.ocr_options, self.chunk.RapidOcrOptions)
         self.assertFalse(options.do_picture_description)
         self.assertTrue(options.do_picture_classification)
         ppt = converter.call_args.kwargs["format_options"][self.chunk.InputFormat.PPTX].pipeline_options
@@ -258,10 +259,20 @@ class ImageIngestionTests(unittest.TestCase):
                     self.assertIn("Image evidence", pages[1])
 
     def test_empty_builtin_description_stops_before_chunking(self):
-        from docling_core.types.doc import DescriptionMetaField, PictureMeta
+        from docling_core.types.doc import (
+            DescriptionMetaField, PictureMeta, PictureClassificationMetaField,
+            PictureClassificationPrediction,
+        )
 
         doc, picture = sample_document()
-        picture.meta = PictureMeta(description=DescriptionMetaField(text="", created_by="test"))
+        # Empty OCR on an unclassified picture is intentionally skipped. Give this
+        # fixture a chart classification so it actually exercises the VLM branch.
+        picture.meta = PictureMeta(
+            description=DescriptionMetaField(text="", created_by="test"),
+            classification=PictureClassificationMetaField(predictions=[
+                PictureClassificationPrediction(class_name="bar_chart", confidence=1.0, created_by="test"),
+            ]),
+        )
         converter = Mock()
         converter.convert.return_value = SimpleNamespace(document=doc, status=self.chunk.ConversionStatus.SUCCESS)
         from app.services import images_routers

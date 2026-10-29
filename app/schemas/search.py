@@ -9,6 +9,9 @@ class SearchRequest(BaseModel):
 
     # 用户问题：支持长题设，按字符数限制，不截断内容。
     query: str = Field(min_length=1, max_length=10000)
+    use_school_tools: bool = Field(default=False, description="允许模型查询当前账号的本地学校数据；指定文档或选区时仍只查询文档。")
+    allow_school_actions: bool = Field(default=False, description="允许下载附件、导入当前项目和标记提醒已读，需同时开启 use_school_tools")
+    allow_school_sync: bool = Field(default=False, description="与 use_school_tools 同时开启时，允许同步单门课程；本地名称未匹配时自动发现学校课程并在唯一匹配后首次导入。指定文档或选区时不执行同步。")
     #需要检索子片占总体子片的百分比
     candidate_k_percentage: float = Field(
         default=0.4, gt=0, le=1, allow_inf_nan=False,

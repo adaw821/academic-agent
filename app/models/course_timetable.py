@@ -1,4 +1,5 @@
-from sqlalchemy import ForeignKey, Integer, String
+from datetime import date
+from sqlalchemy import Date, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
@@ -41,3 +42,10 @@ class CourseSchedule(Base):
         String,
         nullable=False
     )
+
+    term_name: Mapped[str | None] = mapped_column(String(100))
+    term_start: Mapped[date | None] = mapped_column(Date)
+    term_end: Mapped[date | None] = mapped_column(Date)
+    start_week: Mapped[int | None] = mapped_column(Integer)
+    end_week: Mapped[int | None] = mapped_column(Integer)
+    week_pattern: Mapped[str] = mapped_column(String(10), nullable=False, default='all', server_default='all')

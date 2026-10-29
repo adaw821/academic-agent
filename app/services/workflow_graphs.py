@@ -1,8 +1,9 @@
 """LangGraph topology for synchronous, request-local workflows.
 
-Nodes run sequentially because they share a SQLAlchemy session. Graphs have no
-checkpointer or automatic node retries: transaction ownership remains with the
-API/background task, and a failed write must not be replayed implicitly.
+Nodes run sequentially because they share a SQLAlchemy session. Durable callers
+wrap replay-safe nodes with database-backed checkpoints from durable_workflows.
+Final writes are never cached: domain writes and run completion commit together.
+The plain synchronous graph does not automatically retry failed nodes.
 """
 from typing import Any, TypedDict
 
@@ -23,6 +24,8 @@ class QAState(TypedDict, total=False):
     translated_candidates: list[dict]
     final_chunks: list[dict]
     result: dict
+    assignment_tool: dict | None
+    assignment_data: dict
 
 
 class DocumentState(TypedDict, total=False):
@@ -41,9 +44,19 @@ def build_qa_graph(nodes):
     graph = StateGraph(QAState)
     for name, node in nodes.items():
         graph.add_node(name, timed_stage(f"graph.qa.{name}")(node))
-    sequence = [START, "validate", "history", "rewrite", "translate"]
+    sequence = [START, "validate", "history"]
     for source, target in zip(sequence, sequence[1:]):
         graph.add_edge(source, target)
+    if "tool_route" in nodes:
+        graph.add_edge("history", "tool_route")
+        graph.add_conditional_edges("tool_route", lambda state: (
+            "assignment_query" if state.get("assignment_tool") else "rewrite"
+        ), ["assignment_query", "rewrite"])
+        graph.add_edge("assignment_query", "assignment_answer")
+        graph.add_edge("assignment_answer", "save")
+    else:
+        graph.add_edge("history", "rewrite")
+    graph.add_edge("rewrite", "translate")
     graph.add_conditional_edges("translate", lambda state: (
         "selection_retrieve" if state.get("selection") is not None else "retrieve_original"
     ), ["selection_retrieve", "retrieve_original"])

@@ -134,7 +134,8 @@ def context_compress(
         if result.rowcount != 1:
             db.rollback()
             raise HTTPException(status_code=409, detail="会话摘要已被其他请求更新，请重试本次提问。")
-        db.commit()
+        if not db.info.get("durable_workflow"):
+            db.commit()
     except SQLAlchemyError:
         db.rollback()
         raise

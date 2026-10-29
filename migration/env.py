@@ -17,6 +17,10 @@ from app.models.document_child import Child
 from app.models.user_session import UserSession
 from app.models.conversation import Conversation
 from app.models.message import Message
+from app.models.assignments import Assignment
+from app.models.course_resources import CourseResource
+from app.models.workflow_run import WorkflowRun
+from app.models.deadline_reminder import DeadlineReminder
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

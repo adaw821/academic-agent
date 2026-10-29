@@ -1,5 +1,6 @@
 """Load local QA models before accepting requests."""
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 
 from app.services.performance import measure_stage, logger
@@ -25,4 +26,25 @@ def preload_models():
 async def lifespan(app):
     # Await completion: a failed load fails startup instead of a user's request.
     await asyncio.to_thread(preload_models)
-    yield
+    if app is None:  # Model-only callers/tests have no database lifecycle.
+        yield
+        return
+    from app.services.durable_workflows import recover_pending
+    stop = threading.Event()
+
+    def recover():
+        while not stop.is_set():
+            try:
+                recover_pending(stop=stop)
+            except Exception as exc:
+                logger.warning("workflow_recovery_failed error_type=%s", type(exc).__name__)
+            stop.wait(15)
+
+    # Dedicated daemon: asyncio's executor shutdown otherwise waits indefinitely
+    # for model calls during reload. Process interruption is recovered by leases.
+    worker = threading.Thread(target=recover, name="workflow-recovery", daemon=True)
+    worker.start()
+    try:
+        yield
+    finally:
+        stop.set()

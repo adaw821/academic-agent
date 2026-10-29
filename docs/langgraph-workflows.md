@@ -60,6 +60,6 @@ OCR/VLM 文本写回原 `PictureItem.meta.description`，再导出并分片；`s
 
 节点耗时自动写入 `logs/performance.log`，阶段名为 `graph.qa.*` 和 `graph.document.*`，与已有阶段沿用同一 trace。日志不输出图状态或正文。
 
-图按调用构建，节点闭包持有本次调用的 Session 和请求依赖，避免跨请求共享数据库会话。节点顺序执行，不并行使用同一个 Session。未配置持久化 checkpointer、图节点自动重试或断点续跑；模型与检索算法不因引入图而改变，也不保证单次请求自动加速。
+图按调用构建，节点闭包持有本次调用的 Session 和请求依赖，避免跨请求共享数据库会话。节点顺序执行，不并行使用同一个 Session。文档任务与新增异步问答任务使用 `durable_workflows.py` 的数据库节点检查点、租约和恢复扫描；原同步问答保持原调用方式。最终数据库写入与任务完成同事务提交，不缓存未提交写入。失败任务通过接口重试，服务中断的任务在租约过期后恢复。完整接口和恢复边界见 [后端补齐说明](backend-completion.md)。模型与检索算法不因引入图而改变。
 
 设计参考：[LangGraph 官方 Graph API 文档](https://docs.langchain.com/oss/python/langgraph/graph-api)。

@@ -109,14 +109,14 @@ macOS/Linux 使用 `export DATABASE_URL='...'` 和 `export ZHIPU_API_KEY='...'`�
 ## 6. 启动和检查
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn main:app --reload
+.\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
 打开 [Swagger](http://127.0.0.1:8000/docs)，依次注册、登录、确认当前用户、创建项目、上传文档、查询状态、提问。使用 `POST /api/user/create` 注册（邮箱或手机号至少填写一个），使用 `POST /api/user/login` 登录，账号字段 `account` 填邮箱或手机号。登录返回 `session_id` Cookie；后续项目/文档/问答请求必须携带 Cookie。统一使用 `127.0.0.1`，不要混用 `localhost`，并用 `GET /api/user/me` 确认会话有效。当前会话有效期为 30 分钟，过期重新登录。
 
 上传返回 **202**，等状态变成 `completed` 后再做内容测试；具体请求见 [问答功能测试指南](问答功能测试指南.md)。创建项目不再需要传 `user_id`，归属由登录用户确定。
 
-首次上传或问答会加载/下载向量模型 `BAAI/bge-m3`；首次有候选的问答还会加载/下载重排模型 `BAAI/bge-reranker-v2-m3`，二者是独立模型。非 TXT 文件解析还可能触发 Docling 模型下载，需要可访问相关模型源并留出数 GB 磁盘空间。记录下载/首次加载与后续请求耗时；不要把下载等待计入稳定推理延迟。GPU 不是运行的必需条件，CPU 耗时取决于机器、候选数量和输入长度；记录 GPU/CPU、内存及模型加载错误。
+服务启动时会预加载/下载向量模型 `BAAI/bge-m3`、重排模型 `BAAI/bge-reranker-v2-m3` 和 tokenizer，加载完成后才接受请求。非 TXT 文件解析还可能触发 Docling 模型下载，需要可访问相关模型源并留出数 GB 磁盘空间。记录下载/首次加载与后续请求耗时；不要把下载等待计入稳定推理延迟。GPU 不是运行的必需条件，CPU 耗时取决于机器、候选数量和输入长度；记录 GPU/CPU、内存及模型加载错误。
 
 上传文件写入项目下的 `data/uploads`。后台任务在当前服务进程中执行；处理中不要改代码触发 reload，也不要关闭服务。正式性能测试去掉 `--reload`。
 

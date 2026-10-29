@@ -80,46 +80,19 @@ def list_documents(project_id: int, db: Session = Depends(get_db), user: User = 
     return [{"id": d.id, "filename": d.filename, "status": d.status} for d in documents]
 
 
-# 普通 def 后台任务由框架放到线程池执行，使用独立数据库会话
-@timed_stage("document.process")
 def process_document(document_id: int):
+    from app.models.workflow_run import WorkflowRun
+    from app.services.durable_workflows import new_run, run_workflow
     with SessionLocal() as db:
-        try:
-            with measure_stage("document.pipeline"):
-                document = db.get(Document, document_id)
-                if document is None:
-                    raise ValueError(f"无效文档查询id: {document_id}")
-                document.status = "processing"
-                with measure_stage("document.processing_commit"):
-                    db.commit()
-
-                with measure_stage("document.file_read"):
-                    content = Path(document.storage_path).read_bytes()
-                chunking(
-                    content=content,
-                    db=db,
-                    document_id=document_id,
-                    file_name=document.filename,
-                    #创建一个输出路径
-                    image_output_dir=Path(document.storage_path).with_suffix(".images"),
-                )
-
-                # 分片和完成状态一起提交
-                document.status = "completed"
-                with measure_stage("document.final_commit"):
-                    db.commit()
-        except Exception:
-            db.rollback()
-            logger.exception("event=document_processing_failed document_id=%s", document_id)
-            # 保留原文件；回滚不完整的分片后，单独记录失败状态
-            try:
-                document = db.get(Document, document_id)
-                if document is not None:
-                    document.status = "failed"
-                    db.commit()
-            except Exception:
-                db.rollback()
-                logger.exception("event=document_status_update_failed document_id=%s", document_id)
+        document = db.get(Document, document_id)
+        if document is None:
+            return
+        run = db.scalar(select(WorkflowRun).where(WorkflowRun.document_id == document_id))
+        if run is None:
+            run = new_run(db, document.project_id, document_id=document_id)
+            db.commit()
+        run_id = run.id
+    run_workflow(run_id)
 
 
 @router.post("/projects/{project_id}/documents", status_code=202)
@@ -196,11 +169,14 @@ async def upload_files(
             db.add(document_record)
             with measure_stage("upload.db_flush"):
                 db.flush()
+            from app.services.durable_workflows import new_run
+            run = new_run(db, project_id, document_id=document_record.id)
             saved_files.append(
                 {
                     "id": document_record.id,
                     "filename": original_filename,
                     "status": document_record.status,
+                    "job_id": run.id,
                 }
             )
 
@@ -397,7 +373,13 @@ def user_asking(
     #提问前先验证登录状态。
     user: User = Depends(get_currentUser),
 ):
-    """通过 LangGraph 执行问答；接口参数和响应结构保持不变。"""
+    return execute_qa(project_id, request, db, user)
+
+
+def execute_qa(project_id, request, db, user, *, checkpoints=None):
+    """Execute synchronously or under a durable run with the same graph."""
+    if checkpoints is not None:
+        db.info["durable_workflow"] = True
     def validate(state):
         require_project(db, project_id, user)
         doc_ids = require_document_scope(db, project_id, request.doc_ids)
@@ -465,14 +447,35 @@ def user_asking(
         result = dict(state["result"])
         result["conversation_id"] = history_messages_control(
             result["answer"], history_query, request.conversation_id, db, project_id,
+            response_data=result, commit=checkpoints is None,
         )
         if state["selection"] is not None:
             result["selection"] = state["selection"]
+        if checkpoints is not None:
+            checkpoints.finish(db, result)
         return {"result": result}
 
-    graph = build_qa_graph({
+    nodes = {
         "validate": validate, "history": history, "rewrite": rewrite, "translate": translate,
         "retrieve_original": retrieve_original, "retrieve_translated": retrieve_translated,
         "rerank": rerank, "selection_retrieve": selection_retrieve, "answer": answer, "save": save,
-    })
+    }
+    if request.use_school_tools and request.doc_ids is None and request.document_id is None:
+        from app.services.school_qa import plan_assignment_query, query_assignments, answer_assignments
+
+        def tool_route(state):
+            return {"assignment_tool": plan_assignment_query(request.query, state["history"], state["summary"],
+                                                            allow_school_sync=request.allow_school_sync, allow_school_actions=request.allow_school_actions)}
+
+        def assignment_query(state):
+            return {"assignment_data": query_assignments(db, user.id, state["assignment_tool"], project_id=project_id,
+                                                        allow_school_sync=request.allow_school_sync, allow_school_actions=request.allow_school_actions)}
+
+        def assignment_answer(state):
+            return {"result": answer_assignments(request.query, state["assignment_tool"], state["assignment_data"])}
+
+        nodes.update(tool_route=tool_route, assignment_query=assignment_query, assignment_answer=assignment_answer)
+    if checkpoints is not None:
+        nodes = checkpoints.wrap(nodes, uncached={"validate", "save"})
+    graph = build_qa_graph(nodes)
     return graph.invoke({})["result"]

@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, Integer, Text, String, DateTime, func
+from sqlalchemy import ForeignKey, Integer, Text, String, DateTime, JSON, func
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.database import Base
 from datetime import datetime
@@ -6,6 +6,8 @@ from datetime import datetime
 """用来存会话聊天信息"""
 class Message(Base):
     __tablename__ = "message"
+
+    response_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     id: Mapped[int] = mapped_column(
         Integer,

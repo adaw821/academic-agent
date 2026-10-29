@@ -21,6 +21,7 @@ REWRITE_OUTPUT_TOKENS = 8_192
 REWRITE_SAFETY_MARGIN = 1_024
 
 import re
+import json
 from decimal import Decimal
 from math import ceil
 import jieba
@@ -474,13 +475,21 @@ def history_messages_control(
     query: str,
     conversation_id: int | None,
     db: Session,
-    project_id: int
+    project_id: int,
+    *, response_data: dict | None = None, commit: bool = True,
 ):
 
     #用来标识某个问题和回答是同一轮
     turn_id = uuid4().hex
     if not conversation_id:
-        conversation = Conversation(project_id = project_id)
+        title = query
+        try:
+            selected = json.loads(query)
+            if isinstance(selected, dict) and isinstance(selected.get("query"), str):
+                title = selected["query"]
+        except (ValueError, TypeError):
+            pass
+        conversation = Conversation(project_id=project_id, title=title[:100])
         db.add(conversation)
         db.flush()
 
@@ -495,11 +504,12 @@ def history_messages_control(
             conversation_id = conversation.id,
             content = answer,
             role = "assistant",
+            response_data = response_data,
             turn_id = turn_id
         )
 
         db.add_all([question, reply])
-        db.commit()
+        db.commit() if commit else db.flush()
         return conversation.id
 
     else:
@@ -518,9 +528,10 @@ def history_messages_control(
             conversation_id = conversation_id,
             content = answer,
             role = "assistant",
+            response_data = response_data,
             turn_id = turn_id
         )
 
         db.add_all([question, reply])
-        db.commit()
+        db.commit() if commit else db.flush()
         return conversation_id

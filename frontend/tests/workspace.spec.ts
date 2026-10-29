@@ -39,6 +39,8 @@ async function mockApi(page: Page, loggedIn = true) {
     if (pathname.endsWith('/documents'))
       return route.fulfill({ json: pathname.includes('/1/') ? documents : [] })
     if (pathname.endsWith('/ask')) return route.fulfill({ json: answer })
+    if (pathname === '/api/timetable' && route.request().method() === 'GET')
+      return route.fulfill({ json: { items: [], total: 0 } })
     return route.fulfill({ status: 404, json: { detail: '未匹配的测试接口' } })
   })
 }
@@ -133,13 +135,11 @@ test('上传资料使用 files 字段并轮询至就绪', async ({ page }) => {
   })
   await page.goto('/')
   await expect(page.locator('.research-toolbar h1')).toHaveText(projects[0].name)
-  await page
-    .getByLabel('上传研究资料')
-    .setInputFiles({
-      name: '测试资料.txt',
-      mimeType: 'text/plain',
-      buffer: Buffer.from('测试内容'),
-    })
+  await page.getByLabel('上传研究资料').setInputFiles({
+    name: '测试资料.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('测试内容'),
+  })
   await expect(page.locator('.document-row')).toContainText('解析中')
   await expect(page.locator('.document-row')).toContainText('已就绪', { timeout: 10000 })
   await page
@@ -183,36 +183,36 @@ test('会话过期清空资料并提示重新登录', async ({ page }) => {
 test('课表上传并显示按星期分组的真实响应字段', async ({ page }) => {
   await mockApi(page)
   await page.route('**/api/timetable', (route) =>
-    route.fulfill({
-      json: {
-        message: '课表解析成功',
-        timetables: [
-          {
-            course_name: '机器学习',
-            course_code: 'CS101',
-            day_of_week: 'Mon',
-            start_time: '09:00',
-            end_time: '10:30',
-            location: 'A101',
-            teachers: '张老师',
-            units: 3,
+    route.request().method() === 'GET'
+      ? route.fulfill({ json: { items: [], total: 0 } })
+      : route.fulfill({
+          json: {
+            message: '课表解析成功',
+            timetables: [
+              {
+                course_name: '机器学习',
+                course_code: 'CS101',
+                day_of_week: 'Mon',
+                start_time: '09:00',
+                end_time: '10:30',
+                location: 'A101',
+                teachers: '张老师',
+                units: 3,
+              },
+            ],
           },
-        ],
-      },
-    }),
+        }),
   )
   await page.goto('/')
   await page.getByRole('button', { name: '我的课表', exact: true }).click()
-  await page
-    .getByLabel('上传课表图片')
-    .setInputFiles({
-      name: 'timetable.png',
-      mimeType: 'image/png',
-      buffer: Buffer.from(
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==',
-        'base64',
-      ),
-    })
+  await page.getByLabel('上传课表图片').setInputFiles({
+    name: 'timetable.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==',
+      'base64',
+    ),
+  })
   await page.getByRole('button', { name: '识别并保存课表' }).click()
   await expect(page.locator('.week-grid section').first()).toContainText('机器学习')
   await expect(page.locator('.week-grid section').first()).toContainText('09:00 – 10:30')

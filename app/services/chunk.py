@@ -5,7 +5,7 @@ from time import perf_counter
 from pathlib import Path
 
 from docling.datamodel.base_models import ConversionStatus, DocumentStream, InputFormat
-from docling.datamodel.pipeline_options import ConvertPipelineOptions, PdfPipelineOptions
+from docling.datamodel.pipeline_options import ConvertPipelineOptions, PdfPipelineOptions, RapidOcrOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption, PowerpointFormatOption
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
@@ -41,9 +41,10 @@ def get_embedding_model():
 @timed_stage("chunk.converter_initialize")
 def get_document_converter():
     started_at = perf_counter()
-    # PDF,ppt文字层照常提取；ocr不启用 只要图片分类结果
+    # PDF 保留文字层，并识别扫描页；图片分类与后续图表识别保持独立。
     pdf_options = PdfPipelineOptions(
-        do_ocr=False, generate_picture_images=True, images_scale=2.0,
+        do_ocr=True, ocr_options=RapidOcrOptions(),
+        generate_picture_images=True, images_scale=2.0,
         do_picture_description=False,
         do_picture_classification=True,
     )
@@ -71,6 +72,7 @@ def chunking(
     file_name: str,
     *,
     image_output_dir: str | Path | None = None,
+    checkpoints=None,
 ):
     """使用 Docling 解析文件，再创建父子分片。"""
     total_started_at = perf_counter()
@@ -209,9 +211,15 @@ def chunking(
         "export": document_md,
         "split_embed_store": split_embed_store,
     }
+    if checkpoints is not None:
+        nodes = checkpoints.wrap(nodes, uncached={"split_embed_store"})
     graph = build_document_graph(nodes, is_txt=is_txt,
                                  needs_images=is_paged)
     state = graph.invoke({})
+    from app.models.documents import Document
+    document_record = db.get(Document, document_id)
+    if document_record is not None:
+        document_record.parsed_text = state["text"]
     stats, parse_ms = state["stats"], state["parse_ms"]
 
     performance_logger.info(

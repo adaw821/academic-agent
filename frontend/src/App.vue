@@ -27,6 +27,10 @@ import {
 } from 'lucide-vue-next'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
+import SchoolPanel from './components/SchoolPanel.vue'
+import SavedTimetable from './components/SavedTimetable.vue'
+import ProjectActivity from './components/ProjectActivity.vue'
+import DocumentActions from './components/DocumentActions.vue'
 import {
   ApiError,
   post,
@@ -37,12 +41,16 @@ import {
   type Project,
   type Source,
   type User,
+  type Job,
+  type PageResult,
+  type HistoryMessage,
 } from './api'
 
 interface Turn {
   question: string
   result?: Answer
   error?: string
+  jobId?: string
 }
 interface Chat {
   turns: Turn[]
@@ -55,7 +63,17 @@ const activeId = ref<number | null>(null)
 const documents = ref<Document[]>([])
 const selectedIds = ref<number[]>([])
 const chats = ref<Record<number, Chat>>({})
-const view = ref<'research' | 'timetable'>('research')
+const view = ref<'research' | 'timetable' | 'school'>('research')
+const activityOpen = ref(false)
+const historyLoading = ref(false)
+const schoolTools = ref(false)
+const allowSync = ref(false)
+const allowActions = ref(false)
+const durableAsk = ref(false)
+const savedTimetable = ref<InstanceType<typeof SavedTimetable>>()
+let historyRequest = 0
+let askTimer: ReturnType<typeof setTimeout> | undefined
+let wakeAsk: (() => void) | undefined
 const filter = ref('')
 const query = ref('')
 const asking = ref(false)
@@ -112,7 +130,9 @@ const canAsk = computed(
     !!user.value &&
     !!activeId.value &&
     !!query.value.trim() &&
-    readyDocs.value.length > 0 &&
+    (readyDocs.value.length > 0 ||
+      (schoolTools.value && !selectedIds.value.length && !excerptDocument.value)) &&
+    !historyLoading.value &&
     !asking.value &&
     !loadingDocs.value &&
     (excerptDocument.value === null || !!excerpt.value.trim()),
@@ -147,7 +167,7 @@ const suggestions = [
   },
 ]
 const statusText = (status: string) =>
-  ({ queued: '排队中', processing: '解析中', completed: '已就绪', failed: '处理失败，请重新上传' })[
+  ({ queued: '排队中', processing: '解析中', completed: '已就绪', failed: '处理失败，可重试' })[
     status
   ] || status
 const markdown = (text: string) =>
@@ -198,6 +218,14 @@ function report(e: unknown) {
 }
 function resetSession() {
   sessionVersion++
+  historyRequest++
+  clearTimeout(askTimer)
+  wakeAsk?.()
+  asking.value = false
+  activityOpen.value = false
+  schoolTools.value = false
+  allowSync.value = false
+  allowActions.value = false
   docRequest++
   clearTimeout(pollTimer)
   user.value = null
@@ -316,6 +344,13 @@ async function loadDocuments(id: number) {
     selectedIds.value = selectedIds.value.filter((selected) =>
       result.some((d) => d.id === selected && d.status === 'completed'),
     )
+    if (
+      excerptDocument.value &&
+      !result.some((d) => d.id === excerptDocument.value && d.status === 'completed')
+    ) {
+      excerptDocument.value = null
+      excerpt.value = ''
+    }
     if (result.some((d) => ['queued', 'processing'].includes(d.status)))
       pollTimer = setTimeout(() => void loadDocuments(id), 3500)
   } catch (e) {
@@ -325,6 +360,9 @@ async function loadDocuments(id: number) {
   }
 }
 watch(activeId, (id) => {
+  historyRequest++
+  historyLoading.value = false
+  activityOpen.value = false
   clearTimeout(pollTimer)
   docRequest++
   documents.value = []
@@ -410,6 +448,13 @@ async function ask() {
     query: text,
     conversation_id: chat.conversationId ?? null,
     candidate_k_percentage: recall.value / 100,
+    ...(schoolTools.value
+      ? {
+          use_school_tools: true,
+          allow_school_sync: allowSync.value,
+          allow_school_actions: allowActions.value,
+        }
+      : {}),
     ...(selectedIds.value.length ? { doc_ids: [...selectedIds.value] } : {}),
     ...(excerptDocument.value
       ? { document_id: excerptDocument.value, selected_text: excerpt.value.trim() }
@@ -420,20 +465,104 @@ async function ask() {
   error.value = ''
   void scrollChat()
   try {
-    const result = await post<Answer>(`/projects/${id}/ask`, body)
-    if (version !== sessionVersion) return
-    chat.turns[turnIndex]!.result = result
-    chat.conversationId = result.conversation_id
+    if (durableAsk.value) {
+      const result = await post<Job>(`/projects/${id}/ask/jobs`, body)
+      if (version !== sessionVersion) return
+      chat.turns[turnIndex]!.jobId = result.job_id
+      await pollAnswer(id, chat, turnIndex, result.job_id, version)
+    } else {
+      const result = await post<Answer>(`/projects/${id}/ask`, body)
+      if (version !== sessionVersion) return
+      chat.turns[turnIndex]!.result = result
+      chat.conversationId = result.conversation_id
+    }
   } catch (e) {
+    if (version !== sessionVersion) return
     chat.turns[turnIndex]!.error = e instanceof Error ? e.message : '回答失败'
     if (e instanceof ApiError && e.status === 401) report(e)
   } finally {
-    asking.value = false
+    if (version === sessionVersion) asking.value = false
     void scrollChat()
   }
 }
+async function pollAnswer(id: number, chat: Chat, index: number, jobId: string, version: number) {
+  for (let attempt = 0; attempt < 180; attempt++) {
+    const job = await request<Job>(`/projects/${id}/jobs/${jobId}`)
+    if (version !== sessionVersion) return
+    if (job.status === 'completed' && job.result) {
+      chat.turns[index]!.result = job.result
+      chat.conversationId = job.result.conversation_id
+      if (activeId.value === id) void loadDocuments(id)
+      return
+    }
+    if (job.status === 'failed') throw new Error('任务失败，可在“历史与任务”中重试。')
+    await new Promise<void>((resolve) => {
+      wakeAsk = resolve
+      askTimer = setTimeout(resolve, 2000)
+    })
+    wakeAsk = undefined
+    if (version !== sessionVersion) return
+  }
+  throw new Error('任务仍在后台处理，可在“历史与任务”中继续查看。')
+}
+async function openConversation(conversationId: number) {
+  if (!activeId.value || asking.value) return
+  const id = activeId.value,
+    version = sessionVersion,
+    sequence = ++historyRequest
+  historyLoading.value = true
+  try {
+    const messages: HistoryMessage[] = []
+    let offset = 0,
+      total = 1
+    while (offset < total) {
+      const result = await request<PageResult<HistoryMessage>>(
+        `/projects/${id}/conversations/${conversationId}/messages?limit=100&offset=${offset}`,
+      )
+      if (version !== sessionVersion || id !== activeId.value || sequence !== historyRequest) return
+      messages.push(...result.items)
+      total = result.total
+      offset += result.items.length
+      if (!result.items.length) break
+    }
+    const turns: Turn[] = [],
+      paired = new Map<string | number, Turn>()
+    for (const message of messages) {
+      if (message.role === 'user') {
+        const turn = { question: message.content }
+        turns.push(turn)
+        paired.set(message.turn_id, turn)
+      } else if (message.role === 'assistant') {
+        let turn = paired.get(message.turn_id)
+        if (!turn) {
+          turn = { question: '历史回答' }
+          turns.push(turn)
+        }
+        turn.result = {
+          answer: message.content,
+          conversation_id: conversationId,
+          sources: message.response_data?.sources || [],
+          retrieved_contexts: message.response_data?.retrieved_contexts || [],
+          tool_results: message.response_data?.tool_results,
+        }
+      }
+    }
+    for (const turn of turns) if (!turn.result) turn.error = '此条历史消息暂无已保存回答。'
+    chats.value[id] = { turns, conversationId }
+    source.value = null
+    activityOpen.value = false
+    void scrollChat()
+  } catch (e) {
+    if (version === sessionVersion && sequence === historyRequest) report(e)
+  } finally {
+    if (sequence === historyRequest) historyLoading.value = false
+  }
+}
+function imported(projectId: number) {
+  if (projectId === activeId.value) void loadDocuments(projectId)
+}
 function newChat() {
-  if (activeId.value && !asking.value) {
+  if (activeId.value && !asking.value && !historyLoading.value) {
     chats.value[activeId.value] = { turns: [] }
     source.value = null
     query.value = ''
@@ -485,6 +614,7 @@ async function recognizeTimetable() {
     }
     courses.value = result.timetables
     notice.value = result.message + '，课程已保存。'
+    void savedTimetable.value?.reload()
   } catch (e) {
     report(e)
   } finally {
@@ -493,6 +623,9 @@ async function recognizeTimetable() {
 }
 onMounted(bootstrap)
 onUnmounted(() => {
+  sessionVersion++
+  clearTimeout(askTimer)
+  wakeAsk?.()
   clearTimeout(pollTimer)
   docRequest++
   if (timetablePreview.value) URL.revokeObjectURL(timetablePreview.value)
@@ -522,6 +655,9 @@ onUnmounted(() => {
         </button>
         <button :class="{ active: view === 'timetable' }" @click="changeView('timetable')">
           <CalendarDays :size="18" />我的课表
+        </button>
+        <button :class="{ active: view === 'school' }" @click="changeView('school')">
+          <GraduationCap :size="18" />学校事务
         </button>
       </nav>
       <div class="section-caption">
@@ -581,7 +717,11 @@ onUnmounted(() => {
           <button class="icon-button mobile-menu" aria-label="打开导航" @click="sidebarOpen = true">
             <Menu :size="20" /></button
           ><span>工作空间</span><ChevronRight :size="13" /><strong>{{
-            view === 'timetable' ? '我的课表' : activeProject?.name || '研究工作台'
+            view === 'timetable'
+              ? '我的课表'
+              : view === 'school'
+                ? '学校事务'
+                : activeProject?.name || '研究工作台'
           }}</strong>
         </div>
         <div class="topbar-right">
@@ -621,6 +761,13 @@ onUnmounted(() => {
             </div>
             <div class="toolbar-actions">
               <button
+                class="subtle-button"
+                :disabled="!activeId || historyLoading"
+                @click="activityOpen = !activityOpen"
+              >
+                历史与任务
+              </button>
+              <button
                 class="icon-button"
                 :disabled="!currentChat?.turns.length"
                 title="导出对话"
@@ -630,7 +777,7 @@ onUnmounted(() => {
                 <ArrowDownToLine :size="18" /></button
               ><button
                 class="subtle-button"
-                :disabled="!currentChat?.turns.length || asking"
+                :disabled="!currentChat?.turns.length || asking || historyLoading"
                 @click="newChat"
               >
                 <Plus :size="16" />新对话</button
@@ -645,6 +792,16 @@ onUnmounted(() => {
           </div>
 
           <div class="chat-scroll">
+            <ProjectActivity
+              v-if="activityOpen && activeId && user"
+              :key="`${user.id}:${activeId}`"
+              :project-id="activeId"
+              :locked="asking || historyLoading"
+              @error="report"
+              @conversation="openConversation"
+              @refresh="loadDocuments(activeId)"
+            />
+            <p v-if="historyLoading" class="feature-notice" role="status">正在恢复历史会话…</p>
             <section v-if="!currentChat?.turns.length" class="welcome">
               <div class="welcome-emblem">
                 <BookOpen :size="30" :stroke-width="1.6" /><span><Sparkles :size="13" /></span>
@@ -711,6 +868,9 @@ onUnmounted(() => {
                     <p v-else class="thinking">
                       <LoaderCircle :size="16" class="spin" />正在检索资料、整理回答…
                     </p>
+                    <p v-if="turn.jobId" class="job-id">
+                      任务 {{ turn.jobId }} · 刷新后可从“历史与任务”找回
+                    </p>
                     <div v-if="turn.result?.sources.length" class="source-chips">
                       <button
                         v-for="(citation, i) in turn.result.sources"
@@ -749,6 +909,36 @@ onUnmounted(() => {
                 ></textarea>
               </label>
             </div>
+            <div class="school-tool-settings">
+              <label class="check-label"
+                ><input v-model="schoolTools" type="checkbox" :disabled="asking" />学校助手</label
+              >
+              <template v-if="schoolTools"
+                ><label class="check-label"
+                  ><input
+                    v-model="allowSync"
+                    type="checkbox"
+                    :disabled="asking"
+                  />允许同步课程</label
+                ><label class="check-label"
+                  ><input
+                    v-model="allowActions"
+                    type="checkbox"
+                    :disabled="asking"
+                  />允许下载、导入和已读操作</label
+                ></template
+              >
+              <label class="check-label"
+                ><input
+                  v-model="durableAsk"
+                  type="checkbox"
+                  :disabled="asking"
+                />后台问答（支持恢复）</label
+              >
+              <small v-if="schoolTools"
+                >仅按本轮明确要求执行；选定文档或附带原文时优先文档问答。开启同步后，本地未找到的课程会到学校发现，唯一匹配后首次导入。</small
+              >
+            </div>
             <form class="composer" @submit.prevent="ask">
               <textarea
                 ref="composer"
@@ -761,9 +951,11 @@ onUnmounted(() => {
                     ? '登录后，开启与你的资料的第一场对话…'
                     : !activeId
                       ? '创建项目，开始整理你的研究资料…'
-                      : !readyDocs.length
-                        ? '先上传资料，待解析完成后即可提问…'
-                        : '有什么想从资料中了解的？'
+                      : schoolTools && !selectedIds.length && !excerptDocument
+                        ? '查询学校作业、课表、提醒，或明确要求执行操作…'
+                        : !readyDocs.length
+                          ? '先上传资料，待解析完成后即可提问…'
+                          : '有什么想从资料中了解的？'
                 "
                 aria-label="输入研究问题"
                 @keydown.enter="
@@ -876,26 +1068,38 @@ onUnmounted(() => {
               <LoaderCircle :size="20" class="spin" />正在读取资料…
             </p>
             <div v-else-if="documents.length" class="document-list">
-              <label v-for="doc in documents" :key="doc.id" class="document-row"
-                ><input
-                  v-model="selectedIds"
-                  type="checkbox"
-                  :value="doc.id"
-                  :disabled="doc.status !== 'completed'"
-                  :aria-label="`选择 ${doc.filename}`"
-                /><span class="file-icon" :class="doc.filename.split('.').pop()?.toLowerCase()"
-                  ><FileText :size="19" /></span
-                ><span class="document-info"
-                  ><strong :title="doc.filename">{{ doc.filename }}</strong
-                  ><small :class="doc.status"
-                    ><LoaderCircle
-                      v-if="['queued', 'processing'].includes(doc.status)"
-                      :size="10"
-                      class="spin"
-                    /><i v-else></i>{{ statusText(doc.status) }}</small
-                  ></span
-                ></label
-              ><button
+              <div v-for="doc in documents" :key="doc.id">
+                <label class="document-row"
+                  ><input
+                    v-model="selectedIds"
+                    type="checkbox"
+                    :value="doc.id"
+                    :disabled="doc.status !== 'completed'"
+                    :aria-label="`选择 ${doc.filename}`"
+                  /><span class="file-icon" :class="doc.filename.split('.').pop()?.toLowerCase()"
+                    ><FileText :size="19" /></span
+                  ><span class="document-info"
+                    ><strong :title="doc.filename">{{ doc.filename }}</strong
+                    ><small :class="doc.status"
+                      ><LoaderCircle
+                        v-if="['queued', 'processing'].includes(doc.status)"
+                        :size="10"
+                        class="spin"
+                      /><i v-else></i>{{ statusText(doc.status) }}</small
+                    ></span
+                  ></label
+                >
+                <DocumentActions
+                  v-if="activeId"
+                  :project-id="activeId"
+                  :document="doc"
+                  :locked="asking"
+                  @error="report"
+                  @notice="notice = $event"
+                  @changed="loadDocuments(activeId)"
+                />
+              </div>
+              <button
                 v-if="selectedIds.length"
                 class="text-button clear-selection"
                 @click="selectedIds = []"
@@ -923,6 +1127,19 @@ onUnmounted(() => {
         </aside>
       </div>
 
+      <SchoolPanel
+        v-else-if="view === 'school' && user"
+        :key="user.id"
+        :projects="projects"
+        :project-id="activeId"
+        @error="report"
+        @imported="imported"
+      />
+      <main v-else-if="view === 'school'" class="feature-page">
+        <h1>学校事务</h1>
+        <p>登录后查看你的课程、作业和提醒。</p>
+        <button class="primary-button" @click="openModal('login')">登录学校事务</button>
+      </main>
       <main v-else class="timetable-main">
         <div class="tiny-label">YOUR WEEK, ORGANIZED</div>
         <h1>把课表，整理成清晰的一周。</h1>
@@ -965,6 +1182,7 @@ onUnmounted(() => {
             >
           </div>
         </div>
+        <SavedTimetable v-if="user" :key="user.id" ref="savedTimetable" @error="report" />
         <div v-if="courses.length" class="week-grid">
           <section v-for="day in days" :key="day[0]">
             <h3>{{ day[1] }}</h3>
@@ -981,7 +1199,7 @@ onUnmounted(() => {
           </section>
         </div>
         <p class="timetable-note">
-          识别结果请与原图核对。当前页面展示本次识别的课程，刷新后需重新上传查看。
+          识别结果请与原图核对。已保存课表可刷新恢复，并可设置学期与单双周规则。
         </p>
       </main>
     </div>
@@ -1088,7 +1306,10 @@ onUnmounted(() => {
               </p>
             </li>
           </ol>
-          <p>对话暂存在当前页面，刷新会清空。可通过右上角下载按钮导出 Markdown 记录。</p>
+          <p>
+            刷新后可从“历史与任务”打开已保存的会话并继续提问，也可导出
+            Markdown。后台问答任务可在任务列表中查看结果或重试。
+          </p>
           <button class="primary-button full-width" @click="closeModal">
             开始探索 <ArrowRight :size="16" /></button
         ></template>
