@@ -7,6 +7,7 @@ export interface Project {
   name: string
 }
 export interface Document {
+  image_summary?: { total: number; failed: number; failures: { picture_id: string; pages: number[]; reason: string }[] } | null
   id: number
   filename: string
   status: 'queued' | 'processing' | 'completed' | 'failed'
@@ -88,6 +89,7 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public code?: string,
   ) {
     super(message)
   }
@@ -113,7 +115,7 @@ export async function request<T>(url: string, init: RequestInit = {}): Promise<T
             : response.status >= 500
               ? '服务暂时不可用，请确认后端已启动后重试。'
               : `请求失败（${response.status}）`
-    throw new ApiError(response.status, message)
+    throw new ApiError(response.status, message, detail?.code)
   }
   return payload as T
 }

@@ -7,7 +7,7 @@ import os
 import logging
 from time import perf_counter
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -77,7 +77,11 @@ def list_documents(project_id: int, db: Session = Depends(get_db), user: User = 
     # 必须先确认项目属于当前用户，再读取该项目的文档。
     require_project(db, project_id, user)
     documents = db.scalars(select(Document).where(Document.project_id == project_id).order_by(Document.id.desc())).all()
-    return [{"id": d.id, "filename": d.filename, "status": d.status} for d in documents]
+    from app.models.workflow_run import WorkflowRun
+    results = {run.document_id: run.result for run in db.scalars(
+        select(WorkflowRun).where(WorkflowRun.project_id == project_id, WorkflowRun.kind == 'document'))}
+    return [{"id": d.id, "filename": d.filename, "status": d.status,
+             "image_summary": (results.get(d.id) or {}).get('image_summary')} for d in documents]
 
 
 def process_document(document_id: int):
@@ -369,19 +373,26 @@ def retrieve_documents(
 def user_asking(
     project_id: int,
     request: SearchRequest,
+    http_request: Request,
     db: Session = Depends(get_db),
     #提问前先验证登录状态。
     user: User = Depends(get_currentUser),
 ):
-    return execute_qa(project_id, request, db, user)
+    return execute_qa(project_id, request, db, user,
+                      local_browser_allowed=bool(http_request.client and http_request.client.host in {'127.0.0.1', '::1'}))
 
 
-def execute_qa(project_id, request, db, user, *, checkpoints=None):
+def execute_qa(project_id, request, db, user, *, checkpoints=None, local_browser_allowed=False):
     """Execute synchronously or under a durable run with the same graph."""
     if checkpoints is not None:
         db.info["durable_workflow"] = True
     def validate(state):
         require_project(db, project_id, user)
+        db.info['local_browser_allowed'] = local_browser_allowed
+        db.info['timetable_image_id'] = request.timetable_image_id
+        if request.timetable_image_id:
+            from app.services.timetable_attachments import read_image
+            read_image(user.id, request.timetable_image_id)
         doc_ids = require_document_scope(db, project_id, request.doc_ids)
         selection = None
         if request.document_id is not None:
@@ -465,7 +476,8 @@ def execute_qa(project_id, request, db, user, *, checkpoints=None):
 
         def tool_route(state):
             return {"assignment_tool": plan_assignment_query(request.query, state["history"], state["summary"],
-                                                            allow_school_sync=request.allow_school_sync, allow_school_actions=request.allow_school_actions)}
+                                                            allow_school_sync=request.allow_school_sync, allow_school_actions=request.allow_school_actions,
+                                                            has_timetable_image=bool(request.timetable_image_id))}
 
         def assignment_query(state):
             return {"assignment_data": query_assignments(db, user.id, state["assignment_tool"], project_id=project_id,

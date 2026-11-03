@@ -1,17 +1,19 @@
 # 【前端配套新增】Cookie 读取浏览器中的会话令牌，hashlib 用来计算其哈希。
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, Request, BackgroundTasks
 import hashlib
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.models.users import User
-from app.schemas.users import UserCreate, UserLogin
+from app.schemas.users import UserCreate, UserLogin, EmailCodeRequest, PasswordReset
 from pwdlib import PasswordHash
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, func, delete
 # get_currentUser 验证登录；UserSession 用于退出时删除会话。
 from app.services.user_services import generate_token, get_currentUser
 from app.models.user_session import UserSession
+
+from app.services.email_auth import settings, rate_limit, deliver_code, verify_code, notify_reset
 
 password_hasher = PasswordHash.recommended()
 
@@ -48,30 +50,44 @@ def logout(
     return {"message": "已退出登录"}
 # 【前端配套新增结束：退出登录接口】
 
+@router.post('/user/email-code', status_code=202)
+def request_email_code(body: EmailCodeRequest, request: Request, background: BackgroundTasks,
+                       db: Session = Depends(get_db)):
+    settings()
+    # Use the trusted socket peer; never trust arbitrary X-Forwarded-For headers.
+    rate_limit(db, 'ip:' + (request.client.host if request.client else 'unknown'), 3600, 30)
+    rate_limit(db, 'email:' + body.email, 60, 1)
+    rate_limit(db, 'daily:' + body.email, 86400, 10)
+    db.commit()
+    background.add_task(deliver_code, body.email, body.purpose)
+    return {'message': '若邮箱符合条件，验证码将发送至邮箱，请检查收件箱及垃圾邮件。', 'retry_after': 60}
+
+
+@router.post('/user/reset-password')
+def reset_password(body: PasswordReset, response: Response, background: BackgroundTasks,
+                   db: Session = Depends(get_db)):
+    verify_code(db, body.email, 'reset', body.code)
+    users = db.scalars(select(User).where(func.lower(User.email) == body.email).with_for_update()).all()
+    if len(users) != 1:
+        raise HTTPException(400, '验证码无效或已过期，请重新获取')
+    user = users[0]
+    user.password_hash = password_hasher.hash(body.password)
+    db.execute(delete(UserSession).where(UserSession.user_id == user.id))
+    db.commit()
+    response.delete_cookie('session_id', path='/', httponly=True, samesite='lax')
+    background.add_task(notify_reset, body.email)
+    return {'message': '密码已重置，请使用新密码登录'}
+
+
 """注册"""
 @router.post("/user/create", status_code=201)
 def user_create(user: UserCreate, db: Session  = Depends(get_db)):
-    email = user.email
-    phone  =user.phone
+    verify_code(db, user.email, 'register', user.code)
+    if db.scalar(select(User.id).where(func.lower(User.email) == user.email)):
+        raise HTTPException(409, '该邮箱已注册，请登录或找回密码')
+    if user.phone and db.scalar(select(User.id).where(User.phone == user.phone)):
+        raise HTTPException(409, '该手机号已被使用，请更换或留空')
 
-    #登录查重邮箱和手机号唯一
-    if email:
-        exising_user = db.scalar(select(User).where(User.email == email))
-        if exising_user:
-            raise HTTPException(
-                status_code=409,
-                detail="邮箱不能重复",
-            )
-
-    if phone:
-        exising_user = db.scalar(select(User).where(User.phone == phone))
-        if exising_user:
-            raise HTTPException(
-                status_code=409,
-                detail="手机号不能重复",
-            )
-
-    
     hashed_password = password_hasher.hash(user.password)
 
     new_user = User(
@@ -113,10 +129,10 @@ def user_login(
     existing_user = db.scalar(
         select(User).where(
             or_(
-                User.email == account,
+                func.lower(User.email) == account.lower(),
                 User.phone == account,
             )
-        )
+        ).with_for_update()
     )
     if existing_user is None:
         raise HTTPException(

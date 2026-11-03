@@ -157,12 +157,12 @@ def run_workflow(run_id):
                 document.status = "processing"
                 db.commit()
                 path = stored_path(document)
-                chunking(path.read_bytes(), db, document.id,
+                image_summary = chunking(path.read_bytes(), db, document.id,
                          document.filename,
                          image_output_dir=path.with_suffix(".images"),
                          checkpoints=checkpoints)
                 document.status = "completed"
-                checkpoints.finish(db, {"document_id": document.id})
+                checkpoints.finish(db, {"document_id": document.id, "image_summary": image_summary if isinstance(image_summary, dict) else None})
             else:
                 from app.models.projects import Project
                 from app.models.users import User
@@ -171,15 +171,17 @@ def run_workflow(run_id):
                 project = db.get(Project, project_id)
                 user = db.get(User, project.user_id)
                 execute_qa(project_id, SearchRequest.model_validate(request), db, user,
-                           checkpoints=checkpoints)
+                           checkpoints=checkpoints, local_browser_allowed=request.get('_local_browser_allowed') is True)
     except Exception as exc:
+        from app.services.image_failures import TooManyImageFailures
+        failure_result = {"image_summary": exc.summary} if isinstance(exc, TooManyImageFailures) else None
         # Do not expose upstream payloads, file paths or credentials via the API.
         logger.warning("workflow_failed run_id=%s error_type=%s", run_id, type(exc).__name__)
         with SessionLocal() as db:
             changed = db.execute(update(WorkflowRun).where(
                 WorkflowRun.id == run_id, WorkflowRun.lease_token == token,
                 WorkflowRun.status == "running",
-            ).values(status="failed", error=type(exc).__name__, lease_token=None, lease_until=None)).rowcount
+            ).values(status="failed", error=type(exc).__name__, result=failure_result, lease_token=None, lease_until=None)).rowcount
             if changed and document_id:
                 from app.models.documents import Document
                 db.execute(update(Document).where(Document.id == document_id).values(status="failed"))

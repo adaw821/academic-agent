@@ -66,8 +66,10 @@ class RoutedImageTests(unittest.TestCase):
         doc, rows = sample()
         response = ApiImageRequestResult("", 0, VlmStopReason.UNSPECIFIED)
         with patch.dict(os.environ, {"ZHIPU_API_KEY": "test-only"}), patch(API_REQUEST, return_value=response):
-            with self.assertRaisesRegex(ValueError, "图片描述"):
-                enrich_routed_images(doc, [rows[1]])
+            output = enrich_routed_images(doc, [rows[1]])
+            self.assertTrue(output[0]["recognition_error"])
+            self.assertEqual(output[0]["text"], "")
+            self.assertNotIn("old OCR", doc.export_to_markdown())
 
     def test_truncated_nonempty_response_is_rejected(self):
         doc, rows = sample()
@@ -77,8 +79,9 @@ class RoutedImageTests(unittest.TestCase):
             budgets.append(kwargs["options"].params["max_tokens"])
             return response
         with patch.dict(os.environ, {"ZHIPU_API_KEY": "test-only"}), patch(API_REQUEST, side_effect=respond) as api:
-            with self.assertRaisesRegex(ValueError, r"#/pictures/1.*stop_reason=length"):
-                enrich_routed_images(doc, [rows[1]])
+            output = enrich_routed_images(doc, [rows[1]])
+            self.assertEqual(output[0]["recognition_error"], "识别结果被截断")
+            self.assertNotIn("Partial evidence", doc.export_to_markdown())
         self.assertEqual(api.call_count, 2)
         self.assertEqual(budgets, [8192, 32768])
 
@@ -106,20 +109,65 @@ class RoutedImageTests(unittest.TestCase):
             doc, rows = sample()
             response = ApiImageRequestResult("", 0, reason)
             with patch.dict(os.environ, {"ZHIPU_API_KEY": "test-only"}), patch(API_REQUEST, return_value=response) as api:
-                with self.assertRaisesRegex(ValueError, rf"#/pictures/1.*stop_reason={reason.value}"):
-                    enrich_routed_images(doc, [rows[1]])
+                output = enrich_routed_images(doc, [rows[1]])
+                self.assertTrue(output[0]["recognition_error"])
+                self.assertEqual(output[0]["id"], rows[1]["id"])
             api.assert_called_once()
 
     def test_missing_pixels_and_invalid_route_fail(self):
         doc, rows = sample()
         doc.pictures[1].image = None
-        with self.assertRaisesRegex(ValueError, "缺少像素"):
-            enrich_routed_images(doc, [rows[1]])
+        output = enrich_routed_images(doc, [rows[1]])
+        self.assertEqual(output[0]["recognition_error"], "图片像素不可用")
         for invalid in ({"id": "missing", "router": "ocr", "text": "x"},
                         {"id": rows[0]["id"], "router": None},
                         {"id": rows[0]["id"], "router": "ocr", "text": ""}):
             with self.assertRaises(ValueError):
                 enrich_routed_images(doc, [invalid])
+
+    def test_failure_does_not_prevent_later_images_and_summary_excludes_skips(self):
+        from app.services.image_failures import summarize_images, check_image_failures
+        doc, rows = sample()
+        rows[0]['router'] = 'vlm'
+        response = ApiImageRequestResult('Later image', 5, VlmStopReason.END_OF_SEQUENCE)
+        with patch.dict(os.environ, {'ZHIPU_API_KEY': 'test-only'}), patch(API_REQUEST, side_effect=[ValueError('HTTP 429 token=private'), response]) as api:
+            output = enrich_routed_images(doc, rows)
+        self.assertEqual(api.call_count, 2)
+        self.assertEqual(output[1]['text'], 'Later image')
+        summary = summarize_images(output)
+        self.assertEqual((summary['failed'], summary['total']), (1, 2))
+        self.assertEqual(summary['failures'][0]['pages'], [1])
+        self.assertNotIn('private', str(summary))
+        check_image_failures(summary)
+
+    def test_real_graph_continues_or_rejects_after_all_images(self):
+        from app.services import chunk, images_routers
+        from app.services.image_failures import TooManyImageFailures
+        stats = dict(child_count=1, parent_count=1, parent_split_ms=0, child_split_ms=0,
+                     embedding_ms=0, parent_db_flush_ms=0)
+        for filename in ('paper.pdf', 'slides.pptx'):
+            for fail_count in (1, 3):
+                with self.subTest(filename=filename, fail_count=fail_count):
+                    doc, _ = sample()
+                    converter = Mock()
+                    converter.convert.return_value = SimpleNamespace(document=doc, status=chunk.ConversionStatus.SUCCESS)
+                    responses = [ValueError('HTTP 429')] * fail_count + [ApiImageRequestResult('Good image', 5, VlmStopReason.END_OF_SEQUENCE)] * (3 - fail_count)
+                    with patch.dict(os.environ, {'ZHIPU_API_KEY': 'test-only'}), \
+                         patch.object(chunk, 'get_document_converter', return_value=converter), \
+                         patch.object(images_routers, 'get_ocr_engine', return_value=Mock(side_effect=RuntimeError('OCR unavailable'))), \
+                         patch(API_REQUEST, side_effect=responses) as api, \
+                         patch.object(chunk, 'splitter_creator', return_value=stats) as splitter:
+                        if fail_count == 3:
+                            with self.assertRaises(TooManyImageFailures) as error:
+                                chunk.chunking(b'test', Mock(), 1, filename)
+                            self.assertEqual(error.exception.summary['failed'], 3)
+                            splitter.assert_not_called()
+                        else:
+                            summary = chunk.chunking(b'test', Mock(), 1, filename)
+                            self.assertEqual(summary['failed'], 1)
+                            self.assertIn('Before', splitter.call_args.args[0])
+                            self.assertIn('Good image', splitter.call_args.args[0])
+                        self.assertEqual(api.call_count, 3)
 
     def test_long_text_quality_is_batched_and_labels_keep_picture_order(self):
         with patch.dict(os.environ, {"DATABASE_URL": "sqlite:///:memory:"}):

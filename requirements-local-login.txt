@@ -1,0 +1,4 @@
+# Browser dependency shared by requirements.txt and the minimal desktop upgrade.
+# Install with the same Python interpreter used to run the backend.
+# Browser binaries: python -m playwright install chromium
+playwright>=1.51,<2

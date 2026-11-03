@@ -218,6 +218,81 @@ test('课表上传并显示按星期分组的真实响应字段', async ({ page 
   await expect(page.locator('.week-grid section').first()).toContainText('09:00 – 10:30')
 })
 
+test('课表手动新增、修正、取消删除及确认删除', async ({ page }) => {
+  await mockApi(page)
+  let rows: Record<string, unknown>[] = []
+  await page.route('**/api/timetable', route => route.fulfill({ json: { items: rows, total: rows.length } }))
+  await page.route('**/api/timetable/entries', route => {
+    rows = [{ ...route.request().postDataJSON(), id: 10, course_id: 1, week_pattern: 'all' }]
+    return route.fulfill({ status: 201, json: { id: 10, course_id: 1 } })
+  })
+  await page.route('**/api/timetable/entries/10', route => {
+    if (route.request().method() === 'DELETE') rows = []
+    else rows = [{ ...rows[0], ...route.request().postDataJSON() }]
+    return route.fulfill({ json: { id: 10 } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: '我的课表', exact: true }).click()
+  await page.getByRole('button', { name: '手动新增安排' }).click()
+  await page.getByLabel('课程名称', { exact: true }).fill('数据库')
+  await page.getByLabel('上课地点', { exact: true }).fill('A101')
+  await page.getByRole('button', { name: '保存上课安排' }).click()
+  await expect(page.locator('.saved-grid')).toContainText('数据库')
+  await page.getByRole('button', { name: '修改时间地点' }).click()
+  await page.getByLabel('上课星期').selectOption('Wed')
+  await page.getByLabel('上课地点', { exact: true }).fill('B202')
+  await page.getByRole('button', { name: '保存上课安排' }).click()
+  await expect(page.locator('.saved-grid')).toContainText('B202')
+  await expect(page.locator('.saved-grid')).toContainText('Wed')
+  await page.getByRole('button', { name: '删除安排', exact: true }).click()
+  await page.getByRole('button', { name: '取消删除' }).click()
+  await expect(page.locator('.saved-grid article')).toHaveCount(1)
+  await page.getByRole('button', { name: '删除安排', exact: true }).click()
+  await page.getByRole('button', { name: '确认删除安排' }).click()
+  await expect(page.locator('.saved-grid article')).toHaveCount(0)
+})
+
+test('学校快照可放入图片补充入口，确认后才识别', async ({ page }) => {
+  await mockApi(page)
+  await page.route('**/api/timetable/mis', route => route.fulfill({ json: {
+    local_login: true, snapshot: { term: '秋季', saved_at: '2026-09-01T00:00:00Z', courses: [] },
+  } }))
+  await page.route('**/api/timetable/mis/capture', route => route.fulfill({ json: { state: 'idle', message: '' } }))
+  await page.route('**/api/timetable/mis/image*', route => route.fulfill({ contentType: 'image/png', body: Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64') }))
+  let uploaded = false
+  await page.route('**/api/timetable', route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { items: [], total: 0 } })
+    uploaded = true
+    return route.fulfill({ json: { message: '课表解析成功', timetables: [] } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: '我的课表', exact: true }).click()
+  await page.getByRole('button', { name: '用此图片补充课表' }).click()
+  await expect(page.getByAltText('待识别的课表预览')).toBeVisible()
+  expect(uploaded).toBe(false)
+  await page.getByRole('button', { name: '识别并保存课表' }).click()
+  await expect.poll(() => uploaded).toBe(true)
+})
+
+test('聊天附加课表图片后通过学校操作工具补充', async ({ page }) => {
+  await mockApi(page)
+  const imageId = 'a'.repeat(32)
+  await page.route('**/api/timetable/attachments', route => route.fulfill({ status: 201, json: { image_id: imageId } }))
+  await page.route('**/api/projects/1/ask', route => {
+    expect(route.request().postDataJSON()).toMatchObject({ timetable_image_id: imageId, use_school_tools: true, allow_school_actions: true })
+    return route.fulfill({ json: { answer: '图片识别完成，已补充课表。', conversation_id: 1, sources: [], retrieved_contexts: [], tool_results: [{ tool: 'supplement_timetable_image', count: 1 }] } })
+  })
+  await page.goto('/')
+  await page.getByLabel('学校助手', { exact: true }).check()
+  await page.getByLabel('允许下载、导入、已读和课表操作').check()
+  await page.getByLabel('附加课表图片', { exact: true }).setInputFiles({ name: '课表.png', mimeType: 'image/png', buffer: Buffer.from('png') })
+  await expect(page.getByText('课表.png · 本轮课表附件')).toBeVisible()
+  await page.getByRole('button', { name: '发送问题' }).click()
+  await expect(page.getByText('图片识别完成，已补充课表。', { exact: true })).toBeVisible()
+  await expect(page.getByText('课表.png · 本轮课表附件')).toHaveCount(0)
+})
+
 test('移动端导航、资料栏与布局不横向溢出', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await mockApi(page)

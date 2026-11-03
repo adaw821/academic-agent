@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import { request, type Course, type PageResult } from '../api'
-const emit = defineEmits<{ error: [unknown] }>()
+const emit = defineEmits<{ error: [unknown]; changed: [] }>()
 interface Schedule extends Course {
   id: number
   course_id: number
@@ -21,6 +21,55 @@ const rows = ref<Schedule[]>([]),
   saving = ref(false),
   message = ref('')
 const editing = ref<Schedule | null>(null)
+const weekdays = [['Mon', '周一'], ['Tue', '周二'], ['Wed', '周三'], ['Thu', '周四'], ['Fri', '周五'], ['Sat', '周六'], ['Sun', '周日']]
+const entryOpen = ref(false)
+const entryId = ref<number | null>(null)
+const deleting = ref<Schedule | null>(null)
+const entry = ref({ course_name: '', course_code: '', teachers: '', day_of_week: 'Mon', start_time: '09:00', end_time: '10:00', location: '' })
+function openEntry(row?: Schedule) {
+  editing.value = null
+  deleting.value = null
+  entryId.value = row?.id ?? null
+  entry.value = { course_name: row?.course_name || '', course_code: row?.course_code || '', teachers: row?.teachers || '', day_of_week: String(row?.day_of_week || 'Mon'), start_time: row?.start_time || '09:00', end_time: row?.end_time || '10:00', location: row?.location || '' }
+  entryOpen.value = true
+  message.value = ''
+}
+async function saveEntry() {
+  if (saving.value) return
+  if (entry.value.end_time <= entry.value.start_time) { message.value = '结束时间必须晚于开始时间。'; return }
+  saving.value = true
+  try {
+    const { day_of_week, start_time, end_time, location } = entry.value
+    await request(entryId.value === null ? '/timetable/entries' : `/timetable/entries/${entryId.value}`, {
+      method: entryId.value === null ? 'POST' : 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(entryId.value === null ? entry.value : { day_of_week, start_time, end_time, location }),
+    })
+    if (!alive) return
+    entryOpen.value = false
+    onDate.value = ''; offset.value = 0
+    message.value = entryId.value === null ? '已添加上课安排，可继续设置学期与单双周。' : '上课安排已修改。'
+    emit('changed')
+    await load()
+  } catch (e) { if (alive) emit('error', e) }
+  finally { saving.value = false }
+}
+async function deleteEntry() {
+  if (!deleting.value || saving.value) return
+  saving.value = true
+  try {
+    await request(`/timetable/entries/${deleting.value.id}`, { method: 'DELETE' })
+    if (!alive) return
+    deleting.value = null
+    editing.value = null
+    entryOpen.value = false
+    offset.value = 0
+    message.value = '已删除这条上课安排。'
+    emit('changed')
+    await load()
+  } catch (e) { if (alive) emit('error', e) }
+  finally { saving.value = false }
+}
 const form = ref({
   term_name: '',
   term_start: '',
@@ -55,6 +104,7 @@ async function load() {
 defineExpose({ reload: load })
 onMounted(load)
 function edit(row: Schedule) {
+  entryOpen.value = false
   editing.value = row
   form.value = {
     term_name: row.term_name || '',
@@ -101,9 +151,33 @@ async function save(clear = false) {
   <section class="saved-timetable feature-card" aria-label="已保存课表">
     <div class="field-row">
       <h2>已保存课表</h2>
+      <button class="primary-button" :disabled="loading || saving" @click="openEntry()">手动新增安排</button>
       <button class="subtle-button" :disabled="loading || saving" @click="load">
         刷新已保存课表
       </button>
+    </div>
+    <p>这里的安排用于课表查询。可手动补充、修改时间地点，或删除错误记录；同一门课每个上课时段单独添加。</p>
+    <form v-if="entryOpen" class="calendar-form feature-card" @submit.prevent="saveEntry">
+      <h3>{{ entryId === null ? '新增上课安排' : '修改上课安排' }}</h3>
+      <div class="field-row">
+        <label>课程名称<input v-model="entry.course_name" required maxlength="500" :disabled="saving || entryId !== null" /></label>
+        <label>课程编号（选填）<input v-model="entry.course_code" maxlength="20" :disabled="saving || entryId !== null" /></label>
+        <label>教师（选填）<input v-model="entry.teachers" maxlength="100" :disabled="saving || entryId !== null" /></label>
+      </div>
+      <p v-if="entryId === null">已有课程按编号或名称关联，沿用其课程名称和教师信息。</p>
+      <div class="field-row">
+        <label>上课星期<select v-model="entry.day_of_week" :disabled="saving"><option v-for="day in weekdays" :key="day[0]" :value="day[0]">{{ day[1] }}</option></select></label>
+        <label>开始时间<input v-model="entry.start_time" type="time" required :disabled="saving" /></label>
+        <label>结束时间<input v-model="entry.end_time" type="time" required :disabled="saving" /></label>
+        <label>上课地点<input v-model="entry.location" maxlength="500" :disabled="saving" /></label>
+      </div>
+      <button class="primary-button" :disabled="saving">保存上课安排</button>
+      <button type="button" class="text-button" :disabled="saving" @click="entryOpen = false">取消编辑</button>
+    </form>
+    <div v-if="deleting" class="feature-card" role="alert">
+      <p>删除「{{ deleting.course_name }}」{{ deleting.day_of_week }} {{ deleting.start_time }}–{{ deleting.end_time }} 的安排？课程资料、其他时段和学校原始快照会保留。</p>
+      <button class="subtle-button" :disabled="saving" @click="deleteEntry">确认删除安排</button>
+      <button class="text-button" :disabled="saving" @click="deleting = null">取消删除</button>
     </div>
     <form
       class="field-row"
@@ -156,6 +230,8 @@ async function save(clear = false) {
         <p v-else>尚未配置学期</p>
         <p v-if="row.teaching_week">查询日期为第 {{ row.teaching_week }} 教学周</p>
         <button class="text-button" :disabled="saving" @click="edit(row)">设置学期与单双周</button>
+        <button class="text-button" :disabled="saving" @click="openEntry(row)">修改时间地点</button>
+        <button class="text-button" :disabled="saving" @click="deleting = row">删除安排</button>
       </article>
     </div>
     <div v-if="onDate" class="pagination">

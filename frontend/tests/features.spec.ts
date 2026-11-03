@@ -205,7 +205,7 @@ test('无文档时可启用学校助手并选择可恢复问答，权限随请�
   await expect(page.getByRole('button', { name: '发送问题' })).toBeDisabled()
   await page.getByLabel('学校助手', { exact: true }).check()
   await page.getByLabel('允许同步课程').check()
-  await page.getByLabel('允许下载、导入和已读操作').check()
+  await page.getByLabel('允许下载、导入、已读和课表操作').check()
   await page.getByLabel('后台问答（支持恢复）').check()
   await page.getByRole('button', { name: '发送问题' }).click()
   await expect(page.locator('.messages')).toContainText(answer.answer)
@@ -257,7 +257,7 @@ test('文档正文安全渲染、原文件下载、重处理和确认删除', as
 test('学校连接、发现与同步、下载和导入当前项目', async ({ page }) => {
   const calls = await setup(page)
   await page.getByRole('button', { name: '学校事务', exact: true }).click()
-  await page.locator('.connection-card summary').click()
+  await page.locator('.connection-card').getByText('手动连接', { exact: true }).click()
   await page.getByLabel('学校会话', { exact: true }).fill('test-session')
   await page.getByRole('button', { name: '验证并保存连接' }).click()
   await expect(page.getByLabel('学校会话', { exact: true })).toHaveValue('')
@@ -343,6 +343,8 @@ test('保存课表学期及单双周、按日期查询，移动端无横向溢�
 
 test('切换项目时丢弃迟到的历史会话响应', async ({ page }) => {
   await setup(page)
+  // The target project is empty; the shared fixture otherwise gives every project history.
+  await page.route('**/api/projects/2/conversations**', route => route.fulfill({ json: { items: [], total: 0 } }))
   let release!: () => void
   const gate = new Promise<void>((resolve) => {
     release = resolve
@@ -422,4 +424,17 @@ test('学校会话失效显示具体原因，应用会话过期清空学校数�
   await page.getByRole('button', { name: '刷新列表' }).click()
   await expect(page.getByRole('dialog')).toContainText('登录已过期')
   await expect(page.locator('.school-page')).toHaveCount(0)
+})
+
+
+test('部分图片识别失败仍可查看正文并显示页码和原因', async ({ page }) => {
+  await setup(page)
+  await page.route('**/api/projects/*/documents', (route) => route.fulfill({ json: [{
+    ...document,
+    image_summary: { total: 5, failed: 1, failures: [{ picture_id: '#/pictures/1', pages: [6], reason: '识别服务限流' }] },
+  }] }))
+  await page.goto('/')
+  await page.getByText('解析完成，部分图片未识别', { exact: false }).click()
+  await expect(page.getByText('第 6 页 · #/pictures/1：识别服务限流')).toBeVisible()
+  await expect(page.getByRole('button', { name: '查看正文' })).toBeEnabled()
 })

@@ -29,6 +29,7 @@ class QAState(TypedDict, total=False):
 
 
 class DocumentState(TypedDict, total=False):
+    image_summary: dict
     text: str
     document: Any
     pictures: Any

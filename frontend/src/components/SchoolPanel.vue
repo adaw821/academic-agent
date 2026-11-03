@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   request,
+  ApiError,
   post,
   localTime,
   safeLink,
@@ -52,6 +53,44 @@ const busy = ref(false),
   message = ref(''),
   session = ref(''),
   configured = ref<boolean | null>(null)
+const localLogin = ref(false)
+const loginPending = ref(false)
+const loginMessage = ref('')
+const connectionState = ref('')
+let loginTimer: ReturnType<typeof setTimeout> | undefined
+interface LoginStatus { state: string; message: string }
+function applyLoginStatus(result: LoginStatus) {
+  if (!alive) return
+  loginMessage.value = result.message
+  loginPending.value = ['opening', 'waiting', 'validating'].includes(result.state)
+  if (result.state === 'connected') {
+    configured.value = true
+    connectionState.value = '已连接'
+  }
+  if (loginPending.value) loginTimer = setTimeout(() => void pollLogin(), 1500)
+}
+async function pollLogin() {
+  try {
+    applyLoginStatus(await request<LoginStatus>('/school/login'))
+  } catch (e) {
+    if (!alive) return
+    loginPending.value = false
+    loginMessage.value = '暂时无法读取登录进度，请重试连接以恢复。'
+    fail(e)
+  }
+}
+function startLogin() {
+  void act(async () => {
+    clearTimeout(loginTimer)
+    applyLoginStatus(await post<LoginStatus>('/school/login', {}))
+  })
+}
+function cancelLogin() {
+  void act(async () => {
+    clearTimeout(loginTimer)
+    applyLoginStatus(await request<LoginStatus>('/school/login', { method: 'DELETE' }))
+  })
+}
 const coursePage = ref<PageResult<SchoolCourse>>({ items: [], total: 0 }),
   courseOffset = ref(0)
 const discovered = ref<{ title: string; source_url: string }[]>([]),
@@ -78,6 +117,7 @@ const unread = ref(true),
 let alive = true,
   generation = 0
 onUnmounted(() => {
+  clearTimeout(loginTimer)
   alive = false
   generation++
 })
@@ -88,7 +128,12 @@ watch(
   },
 )
 function fail(e: unknown) {
-  if (alive) emit('error', e)
+  if (alive) {
+    if (e instanceof ApiError && e.code === 'school_login_required') {
+      connectionState.value = '登录已过期，请重新连接'
+    }
+    emit('error', e)
+  }
 }
 async function act(work: () => Promise<void>) {
   if (busy.value) return
@@ -138,8 +183,12 @@ watch(tab, () => {
 onMounted(async () => {
   void load()
   try {
-    const result = await request<{ configured: boolean }>('/school/session')
-    if (alive) configured.value = result.configured
+    const result = await request<{ configured: boolean; local_login?: boolean }>('/school/session')
+    if (alive) {
+      configured.value = result.configured
+      localLogin.value = result.local_login === true
+      if (localLogin.value) await pollLogin()
+    }
   } catch (e) {
     fail(e)
   }
@@ -153,6 +202,7 @@ function connect() {
         body: JSON.stringify({ session: session.value.trim() }),
       })
       configured.value = true
+      connectionState.value = '已连接'
       message.value = '学校连接已验证并保存。'
     } finally {
       session.value = ''
@@ -163,6 +213,8 @@ function disconnect() {
   void act(async () => {
     await request('/school/session', { method: 'DELETE' })
     configured.value = false
+    connectionState.value = ''
+    loginMessage.value = ''
     session.value = ''
     discovered.value = []
     discoveryDone.value = false
@@ -271,14 +323,25 @@ function read(item: Reminder) {
     <p class="page-description">
       课程、作业与提醒集中查看。这里展示最近同步的数据，所有时间均为北京时间。
     </p>
-    <details class="feature-card connection-card">
+    <details class="feature-card connection-card" open>
       <summary>
         学校连接 ·
         {{
-          configured === null ? '正在检查' : configured ? '已配置（有效性需访问时验证）' : '未配置'
+          connectionState || (configured === null ? '正在检查' : configured ? '已保存连接' : '未连接')
         }}
       </summary>
-      <p>先在学校网站完成登录，再填入 MoodleSession 会话值。此处不收集学校密码。</p>
+      <p>登录学校账号后即可同步课程和作业，已同步的数据会保留。</p>
+      <div class="field-row">
+        <button v-if="localLogin" class="primary-button" :disabled="busy || loginPending" @click="startLogin">
+          {{ loginPending ? '等待学校登录…' : configured ? '重新连接学校' : '连接学校' }}
+        </button>
+        <button v-if="loginPending" class="subtle-button" :disabled="busy" @click="cancelLogin">取消连接</button>
+        <button v-if="configured" class="subtle-button" :disabled="busy || loginPending" @click="disconnect">解除连接</button>
+      </div>
+      <p v-if="loginMessage" role="status">{{ loginMessage }}</p>
+      <details>
+        <summary>手动连接{{ localLogin ? '（备用方式）' : '' }}</summary>
+        <p>在学校网站登录后，从浏览器开发者工具的 Application → Cookies 中复制 MoodleSession 的 Value。此处不收集学校密码。</p>
       <form class="field-row" @submit.prevent="connect">
         <label
           >学校会话<input
@@ -288,16 +351,9 @@ function read(item: Reminder) {
             maxlength="512"
             required
         /></label>
-        <button class="primary-button" :disabled="busy || !session.trim()">验证并保存连接</button>
-        <button
-          type="button"
-          class="subtle-button"
-          :disabled="busy || !configured"
-          @click="disconnect"
-        >
-          解除连接
-        </button>
+        <button class="primary-button" :disabled="busy || loginPending || !session.trim()">验证并保存连接</button>
       </form>
+      </details>
     </details>
     <p v-if="message && !busy" class="feature-notice" role="status">{{ message }}</p>
     <p v-if="busy" class="feature-notice" role="status">正在处理，请稍候…</p>

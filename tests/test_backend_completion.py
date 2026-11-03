@@ -254,6 +254,30 @@ class BackendCompletionTests(unittest.TestCase):
             self.assertEqual(db.scalar(select(func.count()).select_from(Parent)), 1)
             self.assertEqual(db.get(WorkflowRun, run_id).status, 'completed')
 
+    def test_image_failure_summary_is_persisted_and_exposed_for_both_outcomes(self):
+        self.client.app.include_router(fixture.rag.router, prefix="/api")
+        from app.services.image_failures import TooManyImageFailures
+        summary = {'total': 3, 'failed': 3, 'failures': [{'picture_id': '#/pictures/0', 'pages': [2], 'reason': '识别服务限流'}]}
+        with self.sessions() as db:
+            run = durable.new_run(db, 1, document_id=1)
+            db.commit()
+            run_id = run.id
+        module = types.ModuleType('app.services.chunk')
+        module.chunking = Mock(side_effect=TooManyImageFailures(summary))
+        with patch.dict(sys.modules, {'app.services.chunk': module}):
+            durable.run_workflow(run_id)
+        result = self.client.get('/api/projects/1/documents').json()[0]
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['image_summary'], summary)
+        self.assertEqual(self.client.post('/api/projects/1/documents/1/retry').status_code, 202)
+        summary = dict(summary, failed=1)
+        module.chunking = Mock(return_value=summary)
+        with patch.dict(sys.modules, {'app.services.chunk': module}):
+            durable.run_workflow(run_id)
+        result = self.client.get('/api/projects/1/documents').json()[0]
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['image_summary'], summary)
+
     def test_lost_lease_cannot_commit_domain_changes(self):
         with self.sessions() as db:
             run = durable.new_run(db, 1)
@@ -352,7 +376,7 @@ class BackendCompletionTests(unittest.TestCase):
             db.commit()
         entered, release = threading.Event(), threading.Event()
         calls = []
-        def execute(project_id, request, db, user, *, checkpoints):
+        def execute(project_id, request, db, user, *, checkpoints, local_browser_allowed=False):
             calls.append(project_id)
             entered.set()
             release.wait(10)

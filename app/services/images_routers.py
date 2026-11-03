@@ -27,6 +27,8 @@ TEXT_IMAGE_TYPES = {"screenshot_from_computer", "screenshot_from_manual", "full_
 
 def route_ocr_result(record):
     """VLM 仅兜底有文字证据的识别失败，或高置信度的结构化内容。"""
+    if record.get("ocr_failed"):
+        return "vlm"
     scores = record.get("ocr_score")
     score = float(sum(scores) / len(scores)) if scores is not None and len(scores) else 0.0
     record["ocr_mean_score"] = score
@@ -76,7 +78,7 @@ def vlm_router(classifications: list[dict] | None):
             vlms.append(classification)
         else:
             others.append(classification)
-    
+
     return vlms, others
 
 
@@ -94,22 +96,27 @@ def ocr_process(
     for other in others:
         picture_id = other["id"]
         item = pictures_by_id[picture_id]
-        image = item.get_image(document)
+        try:
+            image = item.get_image(document)
 
-        if image is None:
-            other["text"] = ""
-            other["ocr_score"] = []
-            continue
+            if image is None:
+                other["text"] = ""
+                other["ocr_score"] = []
+                other["ocr_failed"] = True
+                continue
 
-        with measure_stage("chunk.rapidocr_image_prepare", picture_id=picture_id):
-            pixels = np.array(image.convert("RGB"))[:, :, ::-1].copy()
-        engine = get_ocr_engine()
-        with measure_stage("chunk.rapidocr_image", picture_id=picture_id):
-            result = engine(pixels)
+            with measure_stage("chunk.rapidocr_image_prepare", picture_id=picture_id):
+                pixels = np.array(image.convert("RGB"))[:, :, ::-1].copy()
+            engine = get_ocr_engine()
+            with measure_stage("chunk.rapidocr_image", picture_id=picture_id):
+                result = engine(pixels)
 
-        other["text"] = "\n".join(result.txts) if result.txts else ""
-        other["ocr_score"] = list(result.scores) if result.scores is not None else []
-        
+            other["text"] = "\n".join(result.txts) if result.txts else ""
+            other["ocr_score"] = list(result.scores) if result.scores is not None else []
+        except Exception:
+            # A failed OCR attempt gets one VLM fallback, counted only if that also fails.
+            other.update(text="", ocr_score=[], ocr_failed=True)
+
     return others
 
 def text_stats(text: str) -> int:

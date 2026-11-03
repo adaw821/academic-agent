@@ -1,3 +1,7 @@
+from app.config import load_config
+
+load_config()
+
 from fastapi import FastAPI
 from app.services.startup import lifespan
 
@@ -37,3 +41,6 @@ app.include_router(assignments_router, prefix="/api")
 app.include_router(course_sync_router, prefix="/api")
 app.include_router(library_router, prefix="/api")
 app.include_router(school_router, prefix="/api")
+
+from app.routers.mis_timetable import router as mis_timetable_router
+app.include_router(mis_timetable_router, prefix="/api")

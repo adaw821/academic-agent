@@ -31,6 +31,7 @@ import SchoolPanel from './components/SchoolPanel.vue'
 import SavedTimetable from './components/SavedTimetable.vue'
 import ProjectActivity from './components/ProjectActivity.vue'
 import DocumentActions from './components/DocumentActions.vue'
+import MISTimetable from './components/MISTimetable.vue'
 import {
   ApiError,
   post,
@@ -69,6 +70,32 @@ const historyLoading = ref(false)
 const schoolTools = ref(false)
 const allowSync = ref(false)
 const allowActions = ref(false)
+const agentImage = ref<{ id: string; name: string } | null>(null)
+const agentImageUploading = ref(false)
+const agentImageInput = ref<HTMLInputElement>()
+async function attachAgentImage(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0]
+  if (!file || agentImageUploading.value) return
+  if (!['image/png', 'image/jpeg'].includes(file.type) || file.size > 10 * 1024 * 1024) {
+    error.value = '请选择不超过 10 MB 的 PNG/JPEG 课表图片。'
+    return
+  }
+  const version = sessionVersion
+  agentImageUploading.value = true
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    const result = await request<{ image_id: string }>('/timetable/attachments', { method: 'POST', body: form })
+    if (version === sessionVersion) {
+      agentImage.value = { id: result.image_id, name: file.name }
+      if (!query.value.trim()) query.value = '请识别这张图片，补充到我的课表'
+    }
+  } catch (e) { if (version === sessionVersion) report(e) }
+  finally {
+    agentImageUploading.value = false
+    if (agentImageInput.value) agentImageInput.value.value = ''
+  }
+}
 const durableAsk = ref(false)
 const savedTimetable = ref<InstanceType<typeof SavedTimetable>>()
 let historyRequest = 0
@@ -86,13 +113,40 @@ const mobileDocs = ref(false)
 const error = ref('')
 const notice = ref('')
 const connection = ref<'connecting' | 'online' | 'offline'>('connecting')
-const modal = ref<'login' | 'register' | 'project' | 'help' | null>(null)
+const modal = ref<'login' | 'register' | 'reset' | 'project' | 'help' | null>(null)
 const dialog = ref<HTMLDialogElement>()
 const modalError = ref('')
 const modalBusy = ref(false)
 const account = ref('')
 const password = ref('')
+const emailCode = ref('')
+const confirmPassword = ref('')
+const codeBusy = ref(false)
+const codeNotice = ref('')
+const codeSentAt = ref(0)
+async function sendEmailCode() {
+  if (codeBusy.value || modalBusy.value) return
+  if (Date.now() - codeSentAt.value < 60000) {
+    codeNotice.value = '请等待 60 秒后再发送。'
+    return
+  }
+  codeBusy.value = true
+  modalError.value = ''
+  try {
+    const result = await post<{ message: string }>('/user/email-code', {
+      email: account.value.trim(),
+      purpose: modal.value === 'reset' ? 'reset' : 'register',
+    })
+    codeNotice.value = result.message
+    codeSentAt.value = Date.now()
+  } catch (e) {
+    modalError.value = e instanceof Error ? e.message : '验证码发送失败'
+  } finally {
+    codeBusy.value = false
+  }
+}
 const username = ref('')
+const phone = ref('')
 const projectName = ref('')
 const uploadInput = ref<HTMLInputElement>()
 const imageInput = ref<HTMLInputElement>()
@@ -134,6 +188,8 @@ const canAsk = computed(
       (schoolTools.value && !selectedIds.value.length && !excerptDocument.value)) &&
     !historyLoading.value &&
     !asking.value &&
+    !agentImageUploading.value &&
+    (!agentImage.value || (schoolTools.value && !selectedIds.value.length && !excerptDocument.value)) &&
     !loadingDocs.value &&
     (excerptDocument.value === null || !!excerpt.value.trim()),
 )
@@ -173,6 +229,11 @@ const statusText = (status: string) =>
 const markdown = (text: string) =>
   DOMPurify.sanitize(marked.parse(text, { async: false }) as string)
 function openModal(value: typeof modal.value) {
+  if (codeBusy.value) return
+  password.value = ''
+  emailCode.value = ''
+  confirmPassword.value = ''
+  codeNotice.value = ''
   modalError.value = ''
   modal.value = value
 }
@@ -185,7 +246,7 @@ watch(modal, async (value) => {
   }
 })
 function closeModal() {
-  if (!modalBusy.value) modal.value = null
+  if (!modalBusy.value && !codeBusy.value) modal.value = null
 }
 function changeView(nextView: typeof view.value) {
   view.value = nextView
@@ -274,6 +335,7 @@ function resetSession() {
   schoolTools.value = false
   allowSync.value = false
   allowActions.value = false
+  agentImage.value = null
   docRequest++
   clearTimeout(pollTimer)
   user.value = null
@@ -322,16 +384,30 @@ async function authenticate() {
   modalBusy.value = true
   modalError.value = ''
   try {
+    if (modal.value !== 'login' && password.value !== confirmPassword.value) {
+      throw new Error('两次输入的密码不一致')
+    }
+    if (modal.value === 'reset') {
+      await post('/user/reset-password', {
+        email: account.value.trim(),
+        code: emailCode.value,
+        password: password.value,
+      })
+      notice.value = '密码已重置，请使用新密码登录。'
+      openModal('login')
+      password.value = ''
+      return
+    }
     if (modal.value === 'register') {
       await post('/user/create', {
         username: username.value.trim(),
+        phone: phone.value.trim() || null,
         password: password.value,
-        ...(account.value.includes('@')
-          ? { email: account.value.trim() }
-          : { phone: account.value.trim() }),
+        email: account.value.trim(),
+        code: emailCode.value,
       })
       notice.value = '注册成功，请使用刚才的账号登录。'
-      modal.value = 'login'
+      openModal('login')
       password.value = ''
       return
     }
@@ -504,6 +580,7 @@ async function ask() {
           use_school_tools: true,
           allow_school_sync: allowSync.value,
           allow_school_actions: allowActions.value,
+          ...(agentImage.value ? { timetable_image_id: agentImage.value.id } : {}),
         }
       : {}),
     ...(selectedIds.value.length ? { doc_ids: [...selectedIds.value] } : {}),
@@ -527,6 +604,9 @@ async function ask() {
       chat.turns[turnIndex]!.result = result
       chat.conversationId = result.conversation_id
     }
+    if (version === sessionVersion && chat.turns[turnIndex]?.result?.tool_results?.some(
+      item => item.tool === 'supplement_timetable_image',
+    )) agentImage.value = null
   } catch (e) {
     if (version !== sessionVersion) return
     chat.turns[turnIndex]!.error = e instanceof Error ? e.message : '回答失败'
@@ -649,6 +729,10 @@ function downloadChat() {
 function selectImage(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0]
   if (!file) return
+  prepareTimetableImage(file)
+}
+function prepareTimetableImage(file: File) {
+  if (recognizing.value) return
   if (!['image/png', 'image/jpeg'].includes(file.type) || !file.size) {
     error.value = '请选择非空的 PNG 或 JPEG 图片。'
     return
@@ -1009,7 +1093,7 @@ onUnmounted(() => {
                     v-model="allowActions"
                     type="checkbox"
                     :disabled="asking"
-                  />允许下载、导入和已读操作</label
+                  />允许下载、导入、已读和课表操作</label
                 ></template
               >
               <label class="check-label"
@@ -1028,10 +1112,16 @@ onUnmounted(() => {
                 ></label
               >
               <small v-if="schoolTools"
-                >仅按本轮明确要求执行；选定文档或附带原文时优先文档问答。开启同步后，本地未找到的课程会到学校发现，唯一匹配后首次导入。</small
+                >仅按本轮明确要求执行。课表操作包含学校获取、图片补充、增删改；学校密码请在弹出的学校窗口输入。选定文档或附带原文时优先文档问答。</small
               >
             </div>
             <form class="composer" @submit.prevent="ask">
+              <div v-if="schoolTools" class="field-row">
+                <input ref="agentImageInput" class="visually-hidden" type="file" accept="image/png,image/jpeg" aria-label="附加课表图片" @change="attachAgentImage" />
+                <button type="button" class="text-button" :disabled="asking || agentImageUploading || !!selectedIds.length || !!excerptDocument" @click="agentImageInput?.click()">{{ agentImageUploading ? '正在上传图片…' : '附加课表图片' }}</button>
+                <span v-if="agentImage">{{ agentImage.name }} · 本轮课表附件</span>
+                <button v-if="agentImage" type="button" class="text-button" :disabled="asking || agentImageUploading" @click="agentImage = null">移除图片附件</button>
+              </div>
               <textarea
                 ref="composer"
                 v-model="query"
@@ -1235,7 +1325,8 @@ onUnmounted(() => {
       <main v-else class="timetable-main">
         <div class="tiny-label">YOUR WEEK, ORGANIZED</div>
         <h1>把课表，整理成清晰的一周。</h1>
-        <p class="page-description">上传一张课表截图，自动识别课程、时间与地点。</p>
+        <p class="page-description">从学校保存课表，用图片补充缺漏，也可以手动新增或修正上课安排。</p>
+        <MISTimetable v-if="user" :key="user.id" :recognizing="recognizing" @supplement="prepareTimetableImage" />
         <div class="timetable-upload">
           <input
             ref="imageInput"
@@ -1253,8 +1344,8 @@ onUnmounted(() => {
           </button>
           <div class="timetable-instructions">
             <span class="step-number">01 — UPLOAD & ORGANIZE</span>
-            <h2>课表截图，就足够了。</h2>
-            <p>使用文字清晰、包含完整上课时间的图片。识别后，课程将保存到你的账号。</p>
+            <h2>用图片补充课表</h2>
+            <p>学校课表有误或缺漏时，上传正确的 PNG/JPEG 图片。识别结果会补充到已保存课表，相同课程、时间和地点的记录会跳过。旧的错误安排请手动修改或删除。</p>
             <button
               class="primary-button"
               :disabled="recognizing || (!timetableFile && !!user)"
@@ -1274,7 +1365,7 @@ onUnmounted(() => {
             >
           </div>
         </div>
-        <SavedTimetable v-if="user" :key="user.id" ref="savedTimetable" @error="report" />
+        <SavedTimetable v-if="user" :key="user.id" ref="savedTimetable" @error="report" @changed="courses = []" />
         <div v-if="courses.length" class="week-grid">
           <section v-for="day in days" :key="day[0]">
             <h3>{{ day[1] }}</h3>
@@ -1291,7 +1382,7 @@ onUnmounted(() => {
           </section>
         </div>
         <p class="timetable-note">
-          识别结果请与原图核对。已保存课表可刷新恢复，并可设置学期与单双周规则。
+          识别结果请与原图核对。可在已保存课表中新增、修改或删除安排，并设置学期与单双周规则。
         </p>
       </main>
     </div>
@@ -1315,8 +1406,16 @@ onUnmounted(() => {
         >
           <X :size="19" /></button
         ><span class="modal-mark"><GraduationCap :size="25" /></span>
-        <template v-if="modal === 'login' || modal === 'register'"
-          ><h2>{{ modal === 'login' ? '欢迎回到你的知识空间' : '开启你的学术工作空间' }}</h2>
+        <template v-if="modal === 'login' || modal === 'register' || modal === 'reset'"
+          ><h2>
+            {{
+              modal === 'login'
+                ? '欢迎回到你的知识空间'
+                : modal === 'reset'
+                  ? '重置应用密码'
+                  : '开启你的学术工作空间'
+            }}
+          </h2>
           <p>整理资料，让每一次探索都有迹可循。</p>
           <form @submit.prevent="authenticate">
             <label v-if="modal === 'register'"
@@ -1327,29 +1426,78 @@ onUnmounted(() => {
                 autocomplete="username"
                 placeholder="如何称呼你" /></label
             ><label
-              >邮箱或手机号<input
+              >{{ modal === 'login' ? '邮箱或手机号' : '邮箱'
+              }}<input
+                :type="modal === 'login' ? 'text' : 'email'"
                 v-model="account"
                 required
                 maxlength="255"
                 autocomplete="username"
-                placeholder="输入邮箱或手机号" /></label
+                :placeholder="modal === 'login' ? '输入邮箱或手机号' : '输入邮箱地址'" /></label
             ><label
               >密码<input
                 v-model="password"
                 type="password"
                 required
-                :minlength="modal === 'register' ? 8 : 1"
+                :minlength="modal === 'login' ? 1 : 8"
                 maxlength="128"
-                :autocomplete="modal === 'register' ? 'new-password' : 'current-password'"
-                :placeholder="modal === 'register' ? '至少 8 位字符' : '输入密码'"
+                :autocomplete="modal === 'login' ? 'current-password' : 'new-password'"
+                :placeholder="modal === 'login' ? '输入密码' : '至少 8 位字符'"
             /></label>
+            <label v-if="modal === 'register'">手机号（选填）
+              <input v-model="phone" type="tel" autocomplete="tel" maxlength="16" pattern="[+]?[0-9]{7,15}" placeholder="可留空，如 13800138000" />
+            </label>
+            <template v-if="modal !== 'login'">
+              <label
+                >确认密码<input
+                  v-model="confirmPassword"
+                  type="password"
+                  required
+                  minlength="8"
+                  maxlength="128"
+                  autocomplete="new-password"
+              /></label>
+              <label
+                >邮箱验证码<input
+                  v-model="emailCode"
+                  required
+                  inputmode="numeric"
+                  pattern="[0-9]{6}"
+                  maxlength="6"
+                  autocomplete="one-time-code"
+                  placeholder="6 位验证码"
+              /></label>
+              <button
+                type="button"
+                class="text-button"
+                :disabled="codeBusy || modalBusy || !account.trim()"
+                @click="sendEmailCode"
+              >
+                {{ codeBusy ? '正在发送…' : '发送验证码' }}
+              </button>
+              <p v-if="codeNotice" role="status">{{ codeNotice }}</p>
+            </template>
             <p v-if="modalError" class="form-error" role="alert">{{ modalError }}</p>
             <button class="primary-button full-width" :disabled="modalBusy">
               <LoaderCircle v-if="modalBusy" class="spin" :size="16" />{{
-                modalBusy ? '请稍候…' : modal === 'login' ? '登录' : '创建账号'
+                modalBusy
+                  ? '请稍候…'
+                  : modal === 'login'
+                    ? '登录'
+                    : modal === 'reset'
+                      ? '重置密码'
+                      : '创建账号'
               }}<ArrowRight v-if="!modalBusy" :size="16" />
             </button>
           </form>
+          <button
+            v-if="modal === 'login'"
+            class="text-button"
+            :disabled="modalBusy"
+            @click="openModal('reset')"
+          >
+            忘记密码？
+          </button>
           <div class="auth-switch">
             {{ modal === 'login' ? '还没有账号？' : '已经有账号？'
             }}<button

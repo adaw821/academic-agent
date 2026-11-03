@@ -15,6 +15,7 @@ from app.models.document_child import Child
 from app.models.document_parents import Parent
 from app.services.images_routers import vlm_router, ocr_process, is_enough_text, get_ocr_error_predictor, route_ocr_result
 from app.services.docling_images import enrich_routed_images
+from app.services.image_failures import summarize_images, check_image_failures
 from app.services.image_extraction import extract_document_images
 from app.services.pdf_chunking import split_pdf_document
 from app.services.ppt_chunking import PPT_CHILD_SIZE, clean_slide_text, split_slide_text
@@ -142,12 +143,17 @@ def chunking(
                 record["router"] = route
 
         if quality_candidates:
-            predictor = get_ocr_error_predictor()
-            with measure_stage("chunk.ocr_quality_batch", image_count=len(quality_candidates)):
-                quality = predictor([item["text"] for item in quality_candidates])
-            if len(quality.labels) != len(quality_candidates):
+            try:
+                predictor = get_ocr_error_predictor()
+                with measure_stage("chunk.ocr_quality_batch", image_count=len(quality_candidates)):
+                    quality = predictor([item["text"] for item in quality_candidates])
+                labels = quality.labels
+            except Exception:
+                # Unavailable OCR quality service: let VLM verify these images instead.
+                labels = ["bad"] * len(quality_candidates)
+            if len(labels) != len(quality_candidates):
                 raise ValueError("OCR 质量检查返回数量与图片数量不一致")
-            for item, label in zip(quality_candidates, quality.labels):
+            for item, label in zip(quality_candidates, labels):
                 item["ocr_quality"] = label
                 item["router"] = "ocr" if label == "good" else "vlm"
 
@@ -165,7 +171,10 @@ def chunking(
     def enrich_images(state):
         document = state["document"]
         classifications = enrich_routed_images(document, state["classifications"])
-        return {"document": document, "classifications": classifications}
+        summary = summarize_images(classifications)
+        # Every image has now been attempted, including those after an earlier failure.
+        check_image_failures(summary)
+        return {"document": document, "classifications": classifications, "image_summary": summary}
 
     def document_md(state):
         """把文件转成md"""
@@ -238,6 +247,8 @@ def chunking(
         stats["parent_count"],
         stats["child_count"],
     )
+
+    return state.get("image_summary", {"total": 0, "failed": 0, "failures": []})
 
 
 @timed_stage("chunk.split_embed_store")

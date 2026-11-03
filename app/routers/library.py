@@ -4,7 +4,7 @@ from pathlib import Path
 import shutil
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
@@ -220,7 +220,7 @@ def delete_document(project_id: int, document_id: int, db: Session = Depends(get
 
 
 @router.post("/projects/{project_id}/ask/jobs", status_code=202)
-def submit_qa(project_id: int, request: SearchRequest, background_tasks: BackgroundTasks,
+def submit_qa(project_id: int, request: SearchRequest, background_tasks: BackgroundTasks, http_request: Request,
               db: Session = Depends(get_db), user: User = Depends(get_currentUser)):
     project_access(db, project_id, user, lock=True)
     from app.routers.rag_flow import require_document_scope
@@ -233,7 +233,12 @@ def submit_qa(project_id: int, request: SearchRequest, background_tasks: Backgro
         conversation = db.get(Conversation, request.conversation_id)
         if conversation is None or conversation.project_id != project_id:
             raise HTTPException(404, "会话不存在")
-    run = new_run(db, project_id, request=request.model_dump(mode="json"))
+    if request.timetable_image_id:
+        from app.services.timetable_attachments import read_image
+        read_image(user.id, request.timetable_image_id)
+    payload = request.model_dump(mode='json')
+    payload['_local_browser_allowed'] = bool(http_request.client and http_request.client.host in {'127.0.0.1', '::1'})
+    run = new_run(db, project_id, request=payload)
     db.commit()
     background_tasks.add_task(run_workflow, run.id)
     return {"job_id": run.id, "status": "queued"}

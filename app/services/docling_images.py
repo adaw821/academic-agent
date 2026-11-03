@@ -8,6 +8,7 @@ from docling.models.stages.picture_description.picture_description_api_model imp
 from docling_core.types.doc import DescriptionMetaField, DoclingDocument, PictureMeta
 from app.services.performance import logger, measure_stage
 from app.services.picture_api import request_picture_description
+from app.services.image_failures import failure_reason
 
 
 VISION_MODEL = "glm-4.6v-flash"
@@ -116,28 +117,41 @@ def enrich_routed_images(document: DoclingDocument, classifications: list[dict])
                 picture.meta.description = None
             record["text"] = ""
             continue
+        record.pop("recognition_error", None)
+        record["pages"] = sorted({prov.page_no for prov in picture.prov})
         if route == "vlm":
-            image = picture.get_image(document)
-            if image is None:
-                raise ValueError(f"VLM 图片缺少像素：{picture.self_ref}")
-            if model is None:
-                model = CheckedPictureDescriptionModel(
-                    enabled=True, enable_remote_services=True, artifacts_path=None,
-                    options=picture_description_options(), accelerator_options=AcceleratorOptions(),
-                )
-                model.provenance = VISION_MODEL
-            # Docling 使用生成器执行请求，必须迭代才会真正识别并写回 meta。
-            model.picture_id = picture.self_ref
-            pages = ",".join(str(prov.page_no) for prov in picture.prov) or "unknown"
-            with measure_stage("chunk.picture_vlm", picture_id=picture.self_ref, pages=pages):
-                try:
-                    processed = list(model(document, [ItemAndImageEnrichmentElement(item=picture, image=image)]))
-                except ValueError as exc:
-                    raise ValueError(f"图片 {picture.self_ref}（页码 {pages}）：{exc}") from exc
-            description = picture.meta.description if picture.meta else None
-            if not processed or description is None or not description.text.strip():
-                raise ValueError(f"VLM 图片描述为空，无法确认识别成功：{picture.self_ref}")
-            record["text"] = description.text.strip()
+            # Clear stale OCR/partial model output before attempting recognition.
+            if picture.meta is not None:
+                picture.meta.description = None
+            try:
+                image = picture.get_image(document)
+                if image is None:
+                    raise ValueError(f"VLM 图片缺少像素：{picture.self_ref}")
+                if model is None:
+                    model = CheckedPictureDescriptionModel(
+                        enabled=True, enable_remote_services=True, artifacts_path=None,
+                        options=picture_description_options(), accelerator_options=AcceleratorOptions(),
+                    )
+                    model.provenance = VISION_MODEL
+                # Docling 使用生成器执行请求，必须迭代才会真正识别并写回 meta。
+                model.picture_id = picture.self_ref
+                pages = ",".join(str(prov.page_no) for prov in picture.prov) or "unknown"
+                with measure_stage("chunk.picture_vlm", picture_id=picture.self_ref, pages=pages):
+                    try:
+                        processed = list(model(document, [ItemAndImageEnrichmentElement(item=picture, image=image)]))
+                    except ValueError as exc:
+                        raise ValueError(f"图片 {picture.self_ref}（页码 {pages}）：{exc}") from exc
+                description = picture.meta.description if picture.meta else None
+                if not processed or description is None or not description.text.strip():
+                    raise ValueError(f"VLM 图片描述为空，无法确认识别成功：{picture.self_ref}")
+                record["text"] = description.text.strip()
+            except Exception as exc:
+                record["text"] = ""
+                record["recognition_error"] = failure_reason(exc)
+                if picture.meta is not None:
+                    picture.meta.description = None
+                logger.warning("event=picture_recognition_failed picture_id=%s error_type=%s",
+                               picture.self_ref, type(exc).__name__)
         else:
             if picture.meta is None:
                 picture.meta = PictureMeta()

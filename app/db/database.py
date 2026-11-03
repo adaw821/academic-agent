@@ -1,4 +1,7 @@
 import os
+from app.config import load_config
+
+load_config()
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker

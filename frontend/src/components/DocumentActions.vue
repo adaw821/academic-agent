@@ -80,6 +80,12 @@ function remove() {
 </script>
 <template>
   <div class="document-actions">
+    <details v-if="document.image_summary?.failed" class="feature-notice">
+      <summary>{{ document.status === 'completed' ? '解析完成，部分图片未识别' : '图片识别失败过多' }}（{{ document.image_summary.failed }}/{{ document.image_summary.total }} 张）</summary>
+      <p v-for="failure in document.image_summary.failures" :key="failure.picture_id">
+        {{ failure.pages.length ? `第 ${failure.pages.join('、')} 页` : '页码未知' }} · {{ failure.picture_id }}：{{ failure.reason }}
+      </p>
+    </details>
     <div class="field-row">
       <button class="text-button" :disabled="busy || document.status !== 'completed'" @click="read">
         查看正文</button

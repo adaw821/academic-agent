@@ -3,7 +3,7 @@ from datetime import date
 from app.services.school_timetable_qa import query_timetable
 from app.services.teaching_calendar import TeachingCalendar
 from typing import Literal
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, Request
 from pydantic import BaseModel, SecretStr, Field, field_validator
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
@@ -19,6 +19,8 @@ from app.services.school_sync import sync_course
 from app.services.school_downloads import download_resource, download_status
 from app.services.school_imports import import_resource
 from app.services.durable_workflows import run_workflow
+
+from app.services.school_login import enabled as local_login_enabled, login_manager
 
 router = APIRouter(tags=["school"])
 
@@ -58,6 +60,7 @@ def school_call(user_id, callback, *, cookie=None):
 def connect_school(request: SchoolConnection, user: User = Depends(get_currentUser)):
     cookie = request.session.get_secret_value()
     school_call(user.id, lambda client: client.discover_courses(), cookie=cookie)
+    login_manager.cancel(user.id)
     save_school_session(user.id, cookie)
     return {"configured": True, "validated": True}
 
@@ -69,13 +72,37 @@ def school_status(user: User = Depends(get_currentUser)):
         configured = True
     except SchoolLoginRequired:
         configured = False
-    return {"configured": configured, "validated": False}
+    return {"configured": configured, "validated": False, "local_login": local_login_enabled()}
 
 
 @router.delete("/school/session", status_code=204)
 def disconnect_school(user: User = Depends(get_currentUser)):
+    login_manager.cancel(user.id)
     remove_school_session(user.id)
     return Response(status_code=204)
+
+
+def require_local_login(request: Request):
+    if not local_login_enabled() or not request.client or request.client.host not in {'127.0.0.1', '::1'}:
+        raise HTTPException(403, "本地登录助手未启用，请使用手动连接")
+
+
+@router.post("/school/login", dependencies=[Depends(require_local_login)])
+def start_school_login(user: User = Depends(get_currentUser)):
+    try:
+        return login_manager.start(user.id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@router.get("/school/login", dependencies=[Depends(require_local_login)])
+def school_login_status(user: User = Depends(get_currentUser)):
+    return login_manager.status(user.id)
+
+
+@router.delete("/school/login", dependencies=[Depends(require_local_login)])
+def cancel_school_login(user: User = Depends(get_currentUser)):
+    return login_manager.cancel(user.id)
 
 
 @router.get("/school/courses")
