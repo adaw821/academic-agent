@@ -65,20 +65,17 @@ onUnmounted(() => { alive = false; clearTimeout(timer) })
 </script>
 <template>
   <section class="feature-card">
-    <h2>学校课表 · MIS</h2>
-    <p>在学校窗口选择学期，保存课表截图和课程明细。之后查看已保存课表无需登录 MIS。</p>
     <div class="field-row">
       <button v-if="enabled" class="primary-button" :disabled="busy || active()" @click="act('POST')">{{ snapshot ? '从 MIS 更新课表' : '从 MIS 保存课表' }}</button>
       <button v-if="status.state === 'ready'" class="primary-button" :disabled="busy" @click="act('PUT')">保存当前学期</button>
       <button v-if="active()" class="subtle-button" :disabled="busy" @click="act('DELETE')">取消</button>
-      <a href="https://mis.bnbu.edu.cn/mis/student/tts/timetable.do" target="_blank" rel="noopener noreferrer">打开学校课表</a>
+      <a class="subtle-button" href="https://mis.bnbu.edu.cn/mis/student/tts/timetable.do" target="_blank" rel="noopener noreferrer">打开学校课表</a>
     </div>
     <p v-if="status.message" role="status">{{ status.message }}</p>
     <p v-if="error" class="form-error" role="alert">{{ error }}</p>
     <template v-if="snapshot">
       <p>{{ snapshot.term }} · 保存于 {{ localTime(snapshot.saved_at) }} · {{ snapshot.courses.length }} 门课程</p>
       <button class="subtle-button" :disabled="preparing || recognizing || active()" @click="useSnapshot">用此图片补充课表</button>
-      <p>学校原始快照供核对。要生成可编辑、可查询的安排，可将此图片放入下方补充入口，再点击“识别并保存课表”。</p>
       <details open>
         <summary>已保存的课表图片</summary>
         <img :src="`/api/timetable/mis/image?v=${encodeURIComponent(snapshot.saved_at)}`" alt="已保存的 MIS 课表" style="width:100%;height:auto" />

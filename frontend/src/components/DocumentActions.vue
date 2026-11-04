@@ -1,14 +1,23 @@
 <script setup lang="ts">
-import { onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { ApiError, request, post, type Document } from '../api'
 const props = defineProps<{ projectId: number; document: Document; locked: boolean }>()
-const emit = defineEmits<{ error: [unknown]; changed: []; notice: [string] }>()
+const emit = defineEmits<{
+  error: [unknown]
+  changed: []
+  notice: [string]
+  'view-doc': [Document]
+}>()
 const busy = ref(false),
   content = ref<string | null>(null),
   confirmDelete = ref(false),
   confirmRestart = ref(false)
+const nativeView = computed(() => {
+  const ext = props.document.filename.split('.').pop()?.toLowerCase() ?? ''
+  return ['pdf', 'docx'].includes(ext)
+})
 let alive = true
 onUnmounted(() => {
   alive = false
@@ -27,12 +36,25 @@ async function action(work: () => Promise<void>) {
 function path() {
   return `/projects/${props.projectId}/documents/${props.document.id}`
 }
-function read() {
+function loadMarkdown() {
   void action(async () => {
     const result = await request<{ content: string }>(path() + '/content')
     if (alive)
       content.value = DOMPurify.sanitize(marked.parse(result.content, { async: false }) as string)
   })
+}
+function read() {
+  // PDF/DOCX：emit view-doc → App.vue 在右栏开一个 viewer tab（带 zoom）
+  // 其他格式：内嵌解析文本
+  if (nativeView.value) {
+    emit('view-doc', props.document)
+    return
+  }
+  loadMarkdown()
+}
+function showParsed() {
+  content.value = null
+  loadMarkdown()
 }
 function download() {
   void action(async () => {
@@ -88,7 +110,14 @@ function remove() {
     </details>
     <div class="field-row">
       <button class="text-button" :disabled="busy || document.status !== 'completed'" @click="read">
-        查看正文</button
+        {{ nativeView ? '查看文档' : '查看正文' }}</button
+      ><button
+        v-if="nativeView"
+        class="text-button"
+        :disabled="busy || document.status !== 'completed'"
+        @click="showParsed"
+      >
+        解析文本</button
       ><button class="text-button" :disabled="busy" @click="download">下载原文件</button>
       <button
         v-if="document.status === 'failed'"

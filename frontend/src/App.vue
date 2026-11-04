@@ -8,9 +8,12 @@ import {
   CalendarDays,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
+  ChevronUp,
   CircleHelp,
   FileText,
+  Folder,
   FolderOpen,
   GraduationCap,
   Layers3,
@@ -18,8 +21,13 @@ import {
   LogOut,
   Menu,
   MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Plus,
   Search,
+  Send,
   Settings2,
   Sparkles,
   Upload,
@@ -31,6 +39,7 @@ import SchoolPanel from './components/SchoolPanel.vue'
 import SavedTimetable from './components/SavedTimetable.vue'
 import ProjectActivity from './components/ProjectActivity.vue'
 import DocumentActions from './components/DocumentActions.vue'
+import DocumentViewer from './components/DocumentViewer.vue'
 import MISTimetable from './components/MISTimetable.vue'
 import {
   ApiError,
@@ -46,7 +55,7 @@ import {
   type PageResult,
   type HistoryMessage,
 } from './api'
-
+ 
 interface Turn {
   question: string
   result?: Answer
@@ -61,8 +70,10 @@ const user = ref<User | null>(null)
 const booting = ref(true)
 const projects = ref<Project[]>([])
 const activeId = ref<number | null>(null)
+const openProjectPicker = ref(false)
 const documents = ref<Document[]>([])
 const selectedIds = ref<number[]>([])
+const viewerDoc = ref<Document | null>(null)
 const chats = ref<Record<number, Chat>>({})
 const view = ref<'research' | 'timetable' | 'school'>('research')
 const activityOpen = ref(false)
@@ -110,8 +121,115 @@ const loadingDocs = ref(false)
 const projectLoading = ref(false)
 const sidebarOpen = ref(false)
 const mobileDocs = ref(false)
+ 
+// 两侧栏可折叠 + 可拖拽调宽（桌面端）
+const sidebarCollapsed = ref(false)
+const documentsCollapsed = ref(false)
+const sidebarWidth = ref(244)
+const documentsWidth = ref(294)
+const MIN_SIDEBAR = 160, MAX_SIDEBAR = 360
+const MIN_DOCS = 220, MAX_DOCS = 720
+ 
+function applyLayoutVars() {
+  document.documentElement.style.setProperty(
+    '--sidebar-w',
+    sidebarCollapsed.value ? '0px' : `${sidebarWidth.value}px`,
+  )
+  document.documentElement.style.setProperty(
+    '--sidebar-w-px',
+    `${sidebarWidth.value}px`,
+  )
+  document.documentElement.style.setProperty(
+    '--docs-w',
+    documentsCollapsed.value ? '0px' : `${documentsWidth.value}px`,
+  )
+  document.documentElement.style.setProperty(
+    '--docs-w-px',
+    `${documentsWidth.value}px`,
+  )
+}
+function persistLayout() {
+  try {
+    localStorage.setItem(
+      'aa.layout',
+      JSON.stringify({
+        sidebarCollapsed: sidebarCollapsed.value,
+        documentsCollapsed: documentsCollapsed.value,
+        sidebarWidth: sidebarWidth.value,
+        documentsWidth: documentsWidth.value,
+      }),
+    )
+  } catch {}
+}
+function loadLayout() {
+  try {
+    const raw = localStorage.getItem('aa.layout')
+    if (raw) {
+      const data = JSON.parse(raw)
+      if (typeof data.sidebarCollapsed === 'boolean') sidebarCollapsed.value = data.sidebarCollapsed
+      if (typeof data.documentsCollapsed === 'boolean') documentsCollapsed.value = data.documentsCollapsed
+      if (typeof data.sidebarWidth === 'number')
+        sidebarWidth.value = Math.min(MAX_SIDEBAR, Math.max(MIN_SIDEBAR, data.sidebarWidth))
+      if (typeof data.documentsWidth === 'number')
+        documentsWidth.value = Math.min(MAX_DOCS, Math.max(MIN_DOCS, data.documentsWidth))
+    }
+  } catch {}
+}
+loadLayout()
+applyLayoutVars()
+watch([sidebarCollapsed, documentsCollapsed, sidebarWidth, documentsWidth], () => {
+  applyLayoutVars()
+  persistLayout()
+})
+ 
+// 拖拽调整宽度
+let dragSide: 'left' | 'right' | null = null
+let startX = 0, startWidth = 0
+function startDrag(side: 'left' | 'right', e: MouseEvent) {
+  e.preventDefault()
+  dragSide = side
+  startX = e.clientX
+  startWidth = side === 'left' ? sidebarWidth.value : documentsWidth.value
+  document.body.style.cursor = side === 'left' ? 'col-resize' : 'col-resize'
+  document.body.style.userSelect = 'none'
+  window.addEventListener('mousemove', onDrag)
+  window.addEventListener('mouseup', endDrag)
+}
+function onDrag(e: MouseEvent) {
+  if (!dragSide) return
+  if (dragSide === 'left') {
+    const next = Math.min(MAX_SIDEBAR, Math.max(MIN_SIDEBAR, startWidth + (e.clientX - startX)))
+    sidebarWidth.value = next
+  } else {
+    const next = Math.min(MAX_DOCS, Math.max(MIN_DOCS, startWidth - (e.clientX - startX)))
+    documentsWidth.value = next
+  }
+}
+function endDrag() {
+  dragSide = null
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+  window.removeEventListener('mousemove', onDrag)
+  window.removeEventListener('mouseup', endDrag)
+}
+onUnmounted(() => endDrag())
 const error = ref('')
 const notice = ref('')
+let errorTimer: ReturnType<typeof setTimeout> | undefined
+let noticeTimer: ReturnType<typeof setTimeout> | undefined
+// Toast 自动消失：错误停留更久，普通提示短一些。
+watch(error, (value) => {
+  clearTimeout(errorTimer)
+  if (value) errorTimer = setTimeout(() => (error.value = ''), 8000)
+})
+watch(notice, (value) => {
+  clearTimeout(noticeTimer)
+  if (value) noticeTimer = setTimeout(() => (notice.value = ''), 4000)
+})
+onUnmounted(() => {
+  clearTimeout(errorTimer)
+  clearTimeout(noticeTimer)
+})
 const connection = ref<'connecting' | 'online' | 'offline'>('connecting')
 const modal = ref<'login' | 'register' | 'reset' | 'project' | 'help' | null>(null)
 const dialog = ref<HTMLDialogElement>()
@@ -164,7 +282,7 @@ const timetablePreview = ref('')
 let pollTimer: ReturnType<typeof setTimeout> | undefined
 let docRequest = 0
 let sessionVersion = 0
-
+ 
 const activeProject = computed(() => projects.value.find((p) => p.id === activeId.value))
 const visibleProjects = computed(() =>
   projects.value.filter((p) => p.name.toLowerCase().includes(filter.value.toLowerCase())),
@@ -182,15 +300,11 @@ const anyBusy = computed(
 const canAsk = computed(
   () =>
     !!user.value &&
-    !!activeId.value &&
     !!query.value.trim() &&
-    (readyDocs.value.length > 0 ||
-      (schoolTools.value && !selectedIds.value.length && !excerptDocument.value)) &&
     !historyLoading.value &&
     !asking.value &&
     !agentImageUploading.value &&
     (!agentImage.value || (schoolTools.value && !selectedIds.value.length && !excerptDocument.value)) &&
-    !loadingDocs.value &&
     (excerptDocument.value === null || !!excerpt.value.trim()),
 )
 const days = [
@@ -256,9 +370,16 @@ function editQuestion(question: string) {
   query.value = question
   composer.value?.focus()
 }
-function openCitation(citation: Source, text?: string) {
-  source.value = { source: citation, text: text || '未返回原文片段' }
-  mobileDocs.value = true
+function openCitation(citation: Source, _text?: string) {
+  const doc = documents.value.find((d) => d.id === citation.document_id)
+  if (doc) {
+    viewerDoc.value = doc
+    mobileDocs.value = true
+  } else {
+    // 回退：文档不在当前列表里时，用旧的纯文字切片详情
+    source.value = { source: citation, text: _text || '未返回原文片段' }
+    mobileDocs.value = true
+  }
 }
 interface CitationGroup {
   filename: string
@@ -280,11 +401,7 @@ function citationGroups(turn: Turn): CitationGroup[] {
   return [...groups.values()]
 }
 function openCitationGroup(group: CitationGroup) {
-  const text = group.items
-    .map((item) => item.text)
-    .filter(Boolean)
-    .join('\n\n—— 同一文档的另一片段 ——\n\n')
-  openCitation(group.items[0].citation, text || '未返回原文片段')
+  openCitation(group.items[0].citation, group.items[0].text || '未返回原文片段')
 }
 const activeTurn = ref(0)
 function turnPreview(question: string) {
@@ -357,7 +474,7 @@ async function loadProjects() {
   projectLoading.value = true
   try {
     projects.value = await request<Project[]>('/projects')
-    if (!activeId.value) activeId.value = projects.value[0]?.id ?? null
+    // 登录后默认不选项目，展示 welcome 页
   } finally {
     projectLoading.value = false
   }
@@ -463,9 +580,16 @@ async function loadDocuments(id: number) {
   clearTimeout(pollTimer)
   const sequence = ++docRequest
   try {
+    const prevProcessing = new Set(
+      documents.value.filter((d) => ['queued', 'processing'].includes(d.status)).map((d) => d.id),
+    )
     const result = await request<Document[]>(`/projects/${id}/documents`)
     if (sequence !== docRequest || id !== activeId.value) return
+    const newlyCompleted = result.some(
+      (d) => d.status === 'completed' && prevProcessing.has(d.id),
+    )
     documents.value = result
+    if (newlyCompleted) playDing()
     selectedIds.value = selectedIds.value.filter((selected) =>
       result.some((d) => d.id === selected && d.status === 'completed'),
     )
@@ -545,9 +669,28 @@ function onDrop(event: DragEvent) {
   dragging.value = false
   void upload(Array.from(event.dataTransfer?.files || []))
 }
+let dingAudio: HTMLAudioElement | null = null
+function playDing() {
+  try {
+    dingAudio ??= new Audio('/prompt.mp3')
+    dingAudio.currentTime = 0
+    dingAudio.play().catch(() => { /* 用户未交互时自动播放会被浏览器拦截，静默忽略 */ })
+  } catch {}
+}
+async function autoCreateProject() {
+  try {
+    const ts = new Date().toLocaleString('zh-CN', { hour12: false }).replace(/[/:]/g, '-')
+    const name = `对话 ${ts}`
+    const result = await post<{ project_id: number }>('/projects', { name })
+    projects.value.unshift({ id: result.project_id, name })
+    activeId.value = result.project_id
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) report(e)
+    else notice.value = e instanceof Error ? e.message : '创建项目失败'
+  }
+}
 function useSuggestion(text: string) {
   if (!user.value) return openModal('login')
-  if (!activeId.value) return newProject()
   query.value = text
   composer.value?.focus()
 }
@@ -556,7 +699,17 @@ async function scrollChat() {
   messagesEnd.value?.scrollIntoView({ behavior: 'smooth', block: 'end' })
 }
 async function ask() {
-  if (!canAsk.value || !activeId.value) return
+  if (!user.value) return openModal('login')
+  if (!query.value.trim() || asking.value || historyLoading.value) return
+  if (!activeId.value) await autoCreateProject()
+  if (!activeId.value) return
+  if (schoolTools.value) {
+    // school-tools mode bypasses readyDocs requirement
+  } else if (excerptDocument.value) {
+    // excerpt mode: requires excerpt + doc match — keep original validation
+  } else if (readyDocs.value.length === 0) {
+    // No docs uploaded: let the flow proceed anyway (RAG will just have no context)
+  }
   if (
     excerptDocument.value &&
     selectedIds.value.length &&
@@ -623,6 +776,7 @@ async function pollAnswer(id: number, chat: Chat, index: number, jobId: string, 
     if (job.status === 'completed' && job.result) {
       chat.turns[index]!.result = job.result
       chat.conversationId = job.result.conversation_id
+      playDing()
       if (activeId.value === id) void loadDocuments(id)
       return
     }
@@ -778,21 +932,66 @@ onUnmounted(() => {
   if (timetablePreview.value) URL.revokeObjectURL(timetablePreview.value)
 })
 </script>
-
+ 
 <template>
-  <div class="app-shell">
+  <!-- 登录页：未登录时显示 -->
+  <div v-if="!user" class="auth-landing">
+    <div class="auth-bg"></div>
+    <div class="auth-overlay"></div>
+    <div class="auth-content">
+      <img
+        class="auth-brand-icon"
+        src="/brand-icon.png"
+        alt="BNBU Academic Agent"
+      />
+      <h1 class="auth-title">BNBU Academic Agent</h1>
+      <div class="auth-actions">
+        <button class="auth-btn auth-btn-login" @click="openModal('login')">
+          登录 / Login
+        </button>
+        <button class="auth-btn auth-btn-register" @click="openModal('register')">
+          注册 / Register
+        </button>
+      </div>
+    </div>
+  </div>
+ 
+  <!-- 主应用：登录后显示 -->
+  <div v-else class="app-shell">
+    <!-- 收起状态下的左栏展开标签（贴屏幕最左边缘） -->
+    <button
+      v-if="sidebarCollapsed"
+      class="collapsed-tab collapsed-tab-left"
+      aria-label="展开左栏"
+      @click="sidebarCollapsed = false"
+    >
+      <PanelLeftOpen :size="14" />
+    </button>
     <button
       v-if="sidebarOpen"
       class="sidebar-scrim"
       aria-label="关闭导航"
       @click="sidebarOpen = false"
     ></button>
-    <aside class="sidebar" :class="{ 'is-open': sidebarOpen }">
-      <a class="brand" href="#" @click.prevent="view = 'research'"
-        ><span class="brand-mark"><GraduationCap :size="23" /></span
-        ><span>Academic<span class="brand-agent">Agent</span></span></a
-      >
-      <div class="workspace-label">个人工作空间 <ChevronDown :size="13" /></div>
+    <aside
+      class="sidebar"
+      :class="{ 'is-open': sidebarOpen, 'sidebar-collapsed': sidebarCollapsed }"
+      :style="{ borderRightWidth: sidebarCollapsed ? '0px' : '1px' }"
+    >
+      <div class="brand-row">
+        <a class="brand" href="#" @click.prevent="view = 'research'; activeId = null"
+          ><img class="brand-mark-img" src="/brand-icon.png" alt="BNBU" />
+          <span>BNBU <span class="brand-agent">Agent</span></span></a
+        >
+        <button
+          class="top-toggle top-toggle-left"
+          :aria-label="sidebarCollapsed ? '展开左栏' : '收起左栏'"
+          @click="sidebarCollapsed = !sidebarCollapsed"
+        >
+          <PanelLeftClose v-if="!sidebarCollapsed" :size="14" />
+          <PanelLeftOpen v-else :size="14" />
+        </button>
+      </div>
       <button class="create-button" @click="newProject">
         <Plus :size="17" /> 新建研究项目 <span>＋</span>
       </button>
@@ -830,11 +1029,6 @@ onUnmounted(() => {
         </p>
       </div>
       <div class="sidebar-bottom">
-        <div class="sidebar-note">
-          <span class="note-symbol">✳</span><strong>让知识，彼此连接。</strong>
-          <p>从阅读到理解，从灵感到发现。</p>
-          <span class="note-line"></span>
-        </div>
         <button class="help-button" @click="openModal('help')">
           <CircleHelp :size="17" />使用指南 <ArrowRight :size="14" />
         </button>
@@ -857,7 +1051,14 @@ onUnmounted(() => {
         </div>
       </div>
     </aside>
-
+    <!-- 左栏 resizer 放在 sidebar 外面（sidebar 有 overflow:hidden，absolute 子元素会被裁） -->
+    <button
+      v-if="!sidebarCollapsed"
+      class="pane-resizer pane-resizer-left"
+      aria-label="拖拽调整左栏宽度"
+      @mousedown="startDrag('left', $event)"
+    ></button>
+ 
     <div class="main-shell">
       <header class="topbar">
         <div class="breadcrumbs">
@@ -872,41 +1073,30 @@ onUnmounted(() => {
           }}</strong>
         </div>
         <div class="topbar-right">
-          <span class="connection" :class="connection"
-            ><i></i
-            >{{
-              connection === 'online'
-                ? '服务已连接'
-                : connection === 'offline'
-                  ? '服务未连接'
-                  : '连接中'
-            }}</span
-          ><button v-if="connection === 'offline'" class="text-button" @click="bootstrap">
-            重试</button
-          ><span class="topbar-divider"></span><span class="version">ACADEMIC AGENT</span>
         </div>
       </header>
-      <div v-if="error" class="banner error" role="alert">
+      <div v-if="error" class="toast error" role="alert">
         <span>{{ error }}</span
         ><button class="icon-button" aria-label="关闭错误提示" @click="error = ''">
           <X :size="16" />
         </button>
       </div>
-      <div v-if="notice" class="banner success" role="status">
-        <Check :size="16" /><span>{{ notice }}</span
+      <div v-if="notice" class="toast success" role="status">
+        <Check :size="18" /><span>{{ notice }}</span
         ><button class="icon-button" aria-label="关闭提示" @click="notice = ''">
           <X :size="16" />
         </button>
       </div>
-
+ 
       <div v-if="view === 'research'" class="research-layout">
         <main class="research-main">
-          <div class="research-toolbar">
+          <div v-if="!activeId" class="welcome-full-bg"></div>
+          <div class="research-toolbar" :class="{ 'toolbar-slim': !activeId }">
             <div>
-              <span class="tiny-label">RESEARCH SPACE</span>
               <h1>{{ activeProject?.name || '研究工作台' }}</h1>
+              <span class="tiny-label">RESEARCH SPACE</span>
             </div>
-            <div class="toolbar-actions">
+            <div v-if="activeId" class="toolbar-actions">
               <button
                 class="subtle-button"
                 :disabled="!activeId || historyLoading"
@@ -937,7 +1127,7 @@ onUnmounted(() => {
               </button>
             </div>
           </div>
-
+ 
           <nav
             v-if="currentChat && currentChat.turns.length > 1"
             class="turn-dots"
@@ -964,42 +1154,123 @@ onUnmounted(() => {
               @refresh="loadDocuments(activeId)"
             />
             <p v-if="historyLoading" class="feature-notice" role="status">正在恢复历史会话…</p>
-            <section v-if="!currentChat?.turns.length" class="welcome">
-              <div class="welcome-emblem">
-                <BookOpen :size="30" :stroke-width="1.6" /><span><Sparkles :size="13" /></span>
+            <section v-if="!activeId" class="welcome welcome-default">
+              <div class="welcome-paper-content">
+                <img class="welcome-emblem-img" src="/brand-icon.png" alt="BNBU" />
+                <div class="welcome-title">Academic Agent</div>
+                <div class="button-row">
+                  <button class="primary-button welcome-new-project" @click="newProject()">
+                    <Plus :size="20" />新建研究项目<ArrowRight :size="16" />
+                  </button>
+                  <button class="primary-button welcome-open-existing" @click="openProjectPicker = !openProjectPicker">
+                    <FolderOpen :size="18" />打开已有项目<ArrowRight :size="16" />
+                  </button>
+                </div>
+                <div v-if="openProjectPicker" class="project-picker">
+                  <div v-if="projects.length === 0" class="picker-empty">暂无项目，先创建一个吧</div>
+                  <button
+                    v-for="p in projects"
+                    :key="p.id"
+                    class="picker-item"
+                    @click="activeId = p.id; openProjectPicker = false"
+                  >
+                    <Folder :size="16" />
+                    <span>{{ p.name }}</span>
+                  </button>
+                </div>
+                <form class="welcome-composer" @submit.prevent="ask">
+                  <textarea
+                    ref="composer"
+                    v-model="query"
+                    :disabled="!user"
+                    maxlength="10000"
+                    rows="2"
+                    placeholder="直接提问，将自动创建一个对话项目…"
+                    aria-label="输入问题"
+                    @keydown.enter="
+                      (event) => {
+                        if (!event.shiftKey && !event.isComposing) {
+                          event.preventDefault()
+                          ask()
+                        }
+                      }
+                    "
+                  ></textarea>
+                  <div class="welcome-composer-bottom">
+                    <span class="welcome-scope-hint"
+                      ><Layers3 :size="13" />自动项目 · 全部资料</span
+                    >
+                    <button
+                      type="submit"
+                      class="send-button"
+                      :disabled="!query.trim() || asking"
+                      aria-label="发送问题"
+                    >
+                      <LoaderCircle v-if="asking" :size="16" class="spin" /><ArrowUp
+                        v-else
+                        :size="16"
+                      />
+                    </button>
+                  </div>
+                </form>
+                <div class="welcome-toolbar">
+                  <div class="welcome-toggles">
+                    <label class="check-label"
+                      ><input v-model="schoolTools" type="checkbox" :disabled="asking" />学校助手</label
+                    >
+                    <label class="check-label"
+                      ><input v-model="durableAsk" type="checkbox" :disabled="asking" />后台问答
+                      <span
+                        class="hint-wrap"
+                        tabindex="0"
+                        aria-label="后台问答说明"
+                        @click.prevent
+                        ><CircleHelp :size="13" /><span class="hint-pop" role="tooltip"
+                          >勾选后，提问会作为后台任务执行：可以切换页面或刷新，任务继续运行，稍后从「历史与任务」找回结果。适合耗时较长的问题。</span
+                        ></span
+                      ></label
+                    >
+                  </div>
+                  <template v-if="schoolTools">
+                    <label class="check-label"
+                      ><input v-model="allowSync" type="checkbox" :disabled="asking" />允许同步课程</label
+                    >
+                    <label class="check-label"
+                      ><input v-model="allowActions" type="checkbox" :disabled="asking" />允许下载、导入、已读和课表操作</label
+                    >
+                    <small class="welcome-toolbar-note"
+                      >仅按本轮明确要求执行。课表操作包含学校获取、图片补充、增删改；学校密码请在弹出的学校窗口输入。</small
+                    >
+                  </template>
+                </div>
               </div>
-              <div class="eyebrow">YOUR KNOWLEDGE, CONNECTED</div>
-              <h2>让每一次提问，<br />都有知识作答<span>。</span></h2>
-              <p class="welcome-description">
-                把论文、笔记与灵感放在一起。<br />与你的资料对话，发现值得深入的下一步。
-              </p>
-              <div v-if="!user || !activeProject" class="start-action">
+            </section>
+            <section v-else-if="!currentChat?.turns.length" class="welcome welcome-empty-chat">
+              <img class="welcome-emblem-img" src="/brand-icon.png" alt="BNBU" />
+              <div class="welcome-title">{{ activeProject?.name }}</div>
+              <div class="empty-chat-suggestions">
                 <button
-                  class="primary-button"
-                  :disabled="booting"
-                  @click="user ? newProject() : openModal('login')"
+                  class="suggestion-chip"
+                  @click="useSuggestion('请帮我总结这些文献的研究问题、研究方法和核心结论，并标注来源。')"
                 >
-                  {{ user ? '创建第一个项目' : '登录，开启研究' }}<ArrowRight :size="16" /></button
-                ><span>你的专属学术知识空间</span>
-              </div>
-              <div v-else class="project-progress">
-                <span :class="{ done: readyDocs.length }"
-                  ><Check v-if="readyDocs.length" :size="13" /><span v-else>1</span>
-                  上传研究资料</span
-                ><i></i><span><span>2</span> 开始探索与提问</span>
-              </div>
-              <div class="suggestions">
+                  <FileText :size="18" />
+                  <span>梳理文献脉络</span>
+                </button>
                 <button
-                  v-for="item in suggestions"
-                  :key="item.title"
-                  @click="useSuggestion(item.query)"
+                  class="suggestion-chip"
+                  @click="useSuggestion('请提取这些资料中的关键概念，用通俗的语言解释，并给出原文依据。')"
                 >
-                  <component :is="item.icon" :size="21" :stroke-width="1.6" /><strong
-                    >{{ item.title }}<ArrowRight :size="14" /></strong
-                  ><span>{{ item.text }}</span>
+                  <Sparkles :size="18" />
+                  <span>概念通俗解读</span>
+                </button>
+                <button
+                  class="suggestion-chip"
+                  @click="useSuggestion('请帮我查找与研究主题相关的资料线索，并说明资料来源。')"
+                >
+                  <Search :size="18" />
+                  <span>检索相关资料</span>
                 </button>
               </div>
-              <p class="welcome-footnote"><span></span>基于你的资料回答 · 引用来源清晰可查</p>
             </section>
             <section v-else class="messages" aria-label="研究对话" aria-live="polite">
               <article
@@ -1055,8 +1326,8 @@ onUnmounted(() => {
               <div ref="messagesEnd"></div>
             </section>
           </div>
-
-          <div class="composer-wrap">
+ 
+          <div v-if="activeId" class="composer-wrap">
             <div v-if="settingsOpen" class="ask-settings">
               <label
                 >检索范围比例 <strong>{{ recall }}%</strong
@@ -1184,131 +1455,203 @@ onUnmounted(() => {
             </p>
           </div>
         </main>
-
-        <aside class="documents-panel" :class="{ 'mobile-visible': mobileDocs }">
+ 
+        <!-- 右栏 resizer（展开时显示） -->
+        <button
+          v-if="!documentsCollapsed"
+          class="pane-resizer pane-resizer-right"
+          aria-label="拖拽调整右栏宽度"
+          @mousedown="startDrag('right', $event)"
+        ></button>
+ 
+        <!-- 右栏收起时的展开图标：和 resizer-right 在 DOM 里紧挨，位置相同 -->
+        <button
+          v-if="documentsCollapsed"
+          class="collapsed-tab collapsed-tab-right"
+          aria-label="展开右栏"
+          @click="documentsCollapsed = false"
+        >
+          <PanelRightOpen :size="14" />
+        </button>
+ 
+        <aside
+          class="documents-panel"
+          :class="{
+            'mobile-visible': mobileDocs,
+            'documents-collapsed': documentsCollapsed,
+            'viewer-mode': !!viewerDoc,
+          }"
+          :style="{ borderLeftWidth: documentsCollapsed ? '0px' : '1px' }"
+        >
           <div class="panel-heading">
             <h2>
               <FileText :size="17" />项目资料 <span>{{ documents.length }}</span>
             </h2>
-            <button
-              class="icon-button panel-close"
-              aria-label="关闭资料栏"
-              @click="mobileDocs = false"
-            >
-              <X :size="18" />
+            <div class="panel-heading-actions">
+              <button
+                v-if="!documentsCollapsed"
+                class="top-toggle top-toggle-right"
+                :aria-label="documentsCollapsed ? '展开右栏' : '收起右栏'"
+                @click="documentsCollapsed = !documentsCollapsed"
+              >
+                <PanelRightClose :size="14" />
+              </button>
+              <button
+                v-if="documentsCollapsed"
+                class="top-toggle top-toggle-right"
+                aria-label="展开右栏"
+                @click="documentsCollapsed = false"
+              >
+                <PanelRightOpen :size="14" />
+              </button>
+              <button
+                class="icon-button panel-close"
+                aria-label="关闭资料栏"
+                @click="mobileDocs = false"
+              >
+                <X :size="18" />
+              </button>
+            </div>
+          </div>
+ 
+          <!-- Tab bar -->
+          <div class="panel-tabs" v-if="viewerDoc">
+            <button class="panel-tab" :class="{ active: !viewerDoc }" @click="viewerDoc = null">
+              <FileText :size="13" /> 项目资料
+            </button>
+            <button class="panel-tab active viewer-tab">
+              <BookOpen :size="13" />
+              <span class="tab-filename" :title="viewerDoc.filename">{{ viewerDoc.filename }}</span>
+              <span class="tab-close" aria-label="关闭文档" @click="viewerDoc = null">
+                <X :size="12" />
+              </span>
             </button>
           </div>
-          <template v-if="source"
-            ><div class="source-detail">
-              <button class="text-button" @click="source = null">← 返回资料列表</button>
-              <h3>[{{ source.source.index }}] {{ source.source.filename }}</h3>
-              <span class="tiny-label">引用原文</span>
-              <p>{{ source.text }}</p>
-              <button class="subtle-button" @click="askFromSource">
-                基于这段原文追问 <ArrowRight :size="14" />
-              </button></div
-          ></template>
-          <template v-else>
-            <p class="panel-description">为你的思考，添加可靠的依据。</p>
-            <input
-              ref="uploadInput"
-              class="visually-hidden"
-              type="file"
-              accept=".pdf,.txt,.docx,.pptx"
-              multiple
-              aria-label="上传研究资料"
-              @change="onFiles"
+ 
+          <!-- Tab content: viewer -->
+          <template v-if="viewerDoc">
+            <DocumentViewer
+              :project-id="activeId!"
+              :document="viewerDoc"
+              @close="viewerDoc = null"
+              @error="report"
             />
-            <button
-              class="upload-zone"
-              :class="{ dragging }"
-              :disabled="!activeId || uploading"
-              @click="uploadInput?.click()"
-              @dragover.prevent="dragging = true"
-              @dragleave.prevent="dragging = false"
-              @drop.prevent="onDrop"
-            >
-              <span class="upload-icon"
-                ><LoaderCircle v-if="uploading" :size="21" class="spin" /><Upload
-                  v-else
-                  :size="21"
-                  :stroke-width="1.5" /></span
-              ><strong>{{ uploading ? '正在上传…' : '点击或拖拽上传' }}</strong
-              ><span>PDF、DOCX、PPTX、TXT</span>
-            </button>
-            <div class="document-list-heading">
-              <span>资料列表</span
-              ><button
-                class="text-button"
-                :disabled="!activeId || loadingDocs"
-                @click="activeId && loadDocuments(activeId)"
-              >
-                刷新
-              </button>
-            </div>
-            <p v-if="loadingDocs" class="empty-docs">
-              <LoaderCircle :size="20" class="spin" />正在读取资料…
-            </p>
-            <div v-else-if="documents.length" class="document-list">
-              <div v-for="doc in documents" :key="doc.id">
-                <label class="document-row"
-                  ><input
-                    v-model="selectedIds"
-                    type="checkbox"
-                    :value="doc.id"
-                    :disabled="doc.status !== 'completed'"
-                    :aria-label="`选择 ${doc.filename}`"
-                  /><span class="file-icon" :class="doc.filename.split('.').pop()?.toLowerCase()"
-                    ><FileText :size="19" /></span
-                  ><span class="document-info"
-                    ><strong :title="doc.filename">{{ doc.filename }}</strong
-                    ><small :class="doc.status"
-                      ><LoaderCircle
-                        v-if="['queued', 'processing'].includes(doc.status)"
-                        :size="10"
-                        class="spin"
-                      /><i v-else></i>{{ statusText(doc.status) }}</small
-                    ></span
-                  ></label
-                >
-                <DocumentActions
-                  v-if="activeId"
-                  :project-id="activeId"
-                  :document="doc"
-                  :locked="asking"
-                  @error="report"
-                  @notice="notice = $event"
-                  @changed="loadDocuments(activeId)"
-                />
-              </div>
+          </template>
+ 
+          <!-- Tab content: list -->
+          <template v-else>
+            <template v-if="source"
+              ><div class="source-detail">
+                <button class="text-button" @click="source = null">← 返回资料列表</button>
+                <h3>[{{ source.source.index }}] {{ source.source.filename }}</h3>
+                <span class="tiny-label">引用原文</span>
+                <p>{{ source.text }}</p>
+                <button class="subtle-button" @click="askFromSource">
+                  基于这段原文追问 <ArrowRight :size="14" />
+                </button></div
+            ></template>
+            <template v-else>
+              <p class="panel-description">为你的思考，添加可靠的依据。</p>
+              <input
+                ref="uploadInput"
+                class="visually-hidden"
+                type="file"
+                accept=".pdf,.txt,.docx,.pptx"
+                multiple
+                aria-label="上传研究资料"
+                @change="onFiles"
+              />
               <button
-                v-if="selectedIds.length"
-                class="text-button clear-selection"
-                @click="selectedIds = []"
+                class="upload-zone"
+                :class="{ dragging }"
+                :disabled="!activeId || uploading"
+                @click="uploadInput?.click()"
+                @dragover.prevent="dragging = true"
+                @dragleave.prevent="dragging = false"
+                @drop.prevent="onDrop"
               >
-                清除选择 · 使用全部资料
+                <span class="upload-icon"
+                  ><LoaderCircle v-if="uploading" :size="21" class="spin" /><Upload
+                    v-else
+                    :size="21"
+                    :stroke-width="1.5" /></span
+                ><strong>{{ uploading ? '正在上传…' : activeId ? '点击或拖拽上传' : '请先创建并选择项目' }}</strong
+                ><span>{{ activeId ? 'PDF、DOCX、PPTX、TXT' : '创建项目后即可在这里上传研究资料' }}</span>
               </button>
-            </div>
-            <div v-else class="empty-docs">
-              <div class="empty-file-art"><FileText :size="33" :stroke-width="1" /></div>
-              <strong>知识，从这里积累</strong
-              ><span>{{
-                !activeId ? '创建项目后，上传你的第一份资料' : '上传第一份资料，让研究有据可循'
-              }}</span>
-            </div>
-            <p v-if="processingCount" class="processing-note">
-              {{ processingCount }} 份资料正在处理，状态将自动更新。
-            </p>
-            <div class="source-note">
-              <span><BookOpen :size="16" />关于资料问答</span>
-              <p>答案将附上引用来源，点击引用即可查看原文片段。</p>
-              <p>勾选资料可限定检索范围；不勾选时使用整个项目。</p>
-            </div>
-            <div class="panel-footer"><span class="privacy-dot"></span>当前账号的独立项目空间</div>
+              <div class="document-list-heading">
+                <span>资料列表</span
+                ><button
+                  class="text-button"
+                  :disabled="!activeId || loadingDocs"
+                  @click="activeId && loadDocuments(activeId)"
+                >
+                  刷新
+                </button>
+              </div>
+              <p v-if="loadingDocs" class="empty-docs">
+                <LoaderCircle :size="20" class="spin" />正在读取资料…
+              </p>
+              <div v-else-if="documents.length" class="document-list">
+                <div v-for="doc in documents" :key="doc.id">
+                  <label class="document-row"
+                    ><input
+                      v-model="selectedIds"
+                      type="checkbox"
+                      :value="doc.id"
+                      :disabled="doc.status !== 'completed'"
+                      :aria-label="`选择 ${doc.filename}`"
+                    /><span class="file-icon" :class="doc.filename.split('.').pop()?.toLowerCase()"
+                      ><FileText :size="19" /></span
+                    ><span class="document-info"
+                      ><strong :title="doc.filename">{{ doc.filename }}</strong
+                      ><small :class="doc.status"
+                        ><LoaderCircle
+                          v-if="['queued', 'processing'].includes(doc.status)"
+                          :size="10"
+                          class="spin"
+                        /><i v-else></i>{{ statusText(doc.status) }}</small
+                      ></span
+                    ></label
+                  >
+                  <DocumentActions
+                    v-if="activeId"
+                    :project-id="activeId"
+                    :document="doc"
+                    :locked="asking"
+                    @error="report"
+                    @notice="notice = $event"
+                    @changed="loadDocuments(activeId)"
+                    @view-doc="viewerDoc = doc"
+                  />
+                </div>
+                <button
+                  v-if="selectedIds.length"
+                  class="text-button clear-selection"
+                  @click="selectedIds = []"
+                >
+                  清除选择 · 使用全部资料
+                </button>
+              </div>
+              <div v-else class="empty-docs">
+                <div class="empty-file-art"><FileText :size="33" :stroke-width="1" /></div>
+                <strong>知识，从这里积累</strong
+                ><span>{{
+                  !activeId ? '创建项目后，上传你的第一份资料' : '上传第一份资料，让研究有据可循'
+                }}</span>
+              </div>
+              <p v-if="processingCount" class="processing-note">
+                {{ processingCount }} 份资料正在处理，状态将自动更新。
+              </p>
+              <div class="source-note">
+                <span><BookOpen :size="16" />关于资料问答</span>
+                <p>答案将附上引用来源，点击引用即可查看原文片段。</p>
+                <p>勾选资料可限定检索范围；不勾选时使用整个项目。</p>
+              </div>
+            </template>
           </template>
         </aside>
       </div>
-
+ 
       <SchoolPanel
         v-else-if="view === 'school' && user"
         :key="user.id"
@@ -1323,9 +1666,7 @@ onUnmounted(() => {
         <button class="primary-button" @click="openModal('login')">登录学校事务</button>
       </main>
       <main v-else class="timetable-main">
-        <div class="tiny-label">YOUR WEEK, ORGANIZED</div>
-        <h1>把课表，整理成清晰的一周。</h1>
-        <p class="page-description">从学校保存课表，用图片补充缺漏，也可以手动新增或修正上课安排。</p>
+        <h1>学校课表 · MIS</h1>
         <MISTimetable v-if="user" :key="user.id" :recognizing="recognizing" @supplement="prepareTimetableImage" />
         <div class="timetable-upload">
           <input
@@ -1386,174 +1727,105 @@ onUnmounted(() => {
         </p>
       </main>
     </div>
-
-    <dialog
-      ref="dialog"
-      class="modal"
-      @cancel.prevent="closeModal"
-      @click="
-        (event) => {
-          if (event.target === dialog) closeModal()
-        }
-      "
-    >
-      <div class="modal-content">
-        <button
-          class="icon-button modal-close"
-          :disabled="modalBusy"
-          aria-label="关闭弹窗"
-          @click="closeModal"
-        >
-          <X :size="19" /></button
-        ><span class="modal-mark"><GraduationCap :size="25" /></span>
-        <template v-if="modal === 'login' || modal === 'register' || modal === 'reset'"
-          ><h2>
-            {{
-              modal === 'login'
-                ? '欢迎回到你的知识空间'
-                : modal === 'reset'
-                  ? '重置应用密码'
-                  : '开启你的学术工作空间'
-            }}
-          </h2>
-          <p>整理资料，让每一次探索都有迹可循。</p>
-          <form @submit.prevent="authenticate">
-            <label v-if="modal === 'register'"
-              >用户名<input
-                v-model="username"
-                required
-                maxlength="20"
-                autocomplete="username"
-                placeholder="如何称呼你" /></label
-            ><label
-              >{{ modal === 'login' ? '邮箱或手机号' : '邮箱'
-              }}<input
-                :type="modal === 'login' ? 'text' : 'email'"
-                v-model="account"
-                required
-                maxlength="255"
-                autocomplete="username"
-                :placeholder="modal === 'login' ? '输入邮箱或手机号' : '输入邮箱地址'" /></label
-            ><label
-              >密码<input
-                v-model="password"
-                type="password"
-                required
-                :minlength="modal === 'login' ? 1 : 8"
-                maxlength="128"
-                :autocomplete="modal === 'login' ? 'current-password' : 'new-password'"
-                :placeholder="modal === 'login' ? '输入密码' : '至少 8 位字符'"
-            /></label>
-            <label v-if="modal === 'register'">手机号（选填）
-              <input v-model="phone" type="tel" autocomplete="tel" maxlength="16" pattern="[+]?[0-9]{7,15}" placeholder="可留空，如 13800138000" />
-            </label>
-            <template v-if="modal !== 'login'">
-              <label
-                >确认密码<input
-                  v-model="confirmPassword"
-                  type="password"
-                  required
-                  minlength="8"
-                  maxlength="128"
-                  autocomplete="new-password"
-              /></label>
-              <label
-                >邮箱验证码<input
-                  v-model="emailCode"
-                  required
-                  inputmode="numeric"
-                  pattern="[0-9]{6}"
-                  maxlength="6"
-                  autocomplete="one-time-code"
-                  placeholder="6 位验证码"
-              /></label>
+ 
+ 
+  </div>
+ 
+  <dialog ref="dialog" class="modal" @cancel.prevent="closeModal">
+    <div class="modal-content">
+      <button class="icon-button modal-close" :disabled="modalBusy" aria-label="关闭弹窗" @click="closeModal">
+        <X :size="19" /></button
+      >
+      <template v-if="modal === 'login' || modal === 'register' || modal === 'reset'"
+        ><h2>
+          {{ modal === 'login' ? 'Welcome Back!' : modal === 'reset' ? 'Reset Password' : 'Get Started' }}
+        </h2>
+        <form @submit.prevent="authenticate" :class="{ 'register-form': modal === 'register' }">
+          <label v-if="modal === 'register'">
+            用户名
+            <input v-model="username" required maxlength="20" autocomplete="username" placeholder="如何称呼你" />
+          </label>
+ 
+          <label>
+            {{ modal === 'login' ? '邮箱或手机号' : '邮箱' }}
+            <div v-if="modal === 'register'" class="email-field-wrap">
+              <input
+                type="email" v-model="account" required maxlength="255" autocomplete="username"
+                placeholder="your@email.com"
+                :class="{ 'email-valid': account && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(account) }"
+              />
               <button
                 type="button"
-                class="text-button"
-                :disabled="codeBusy || modalBusy || !account.trim()"
+                class="send-code-btn"
+                :disabled="codeBusy || modalBusy || !account || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(account)"
                 @click="sendEmailCode"
-              >
-                {{ codeBusy ? '正在发送…' : '发送验证码' }}
-              </button>
-              <p v-if="codeNotice" role="status">{{ codeNotice }}</p>
-            </template>
-            <p v-if="modalError" class="form-error" role="alert">{{ modalError }}</p>
-            <button class="primary-button full-width" :disabled="modalBusy">
-              <LoaderCircle v-if="modalBusy" class="spin" :size="16" />{{
-                modalBusy
-                  ? '请稍候…'
-                  : modal === 'login'
-                    ? '登录'
-                    : modal === 'reset'
-                      ? '重置密码'
-                      : '创建账号'
-              }}<ArrowRight v-if="!modalBusy" :size="16" />
-            </button>
-          </form>
-          <button
-            v-if="modal === 'login'"
-            class="text-button"
-            :disabled="modalBusy"
-            @click="openModal('reset')"
-          >
-            忘记密码？
+              >{{ codeBusy ? '发送中…' : '发送验证码' }}</button>
+            </div>
+            <input
+              v-else
+              :type="modal === 'login' ? 'text' : 'email'" v-model="account" required maxlength="255" autocomplete="username"
+              :placeholder="modal === 'login' ? '邮箱或手机号' : '邮箱地址'"
+            />
+          </label>
+ 
+          <label v-if="modal === 'register'">
+            邮箱验证码
+            <input v-model="emailCode" required inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="6 位验证码" />
+            <p v-if="codeNotice" role="status" class="code-notice">{{ codeNotice }}</p>
+          </label>
+ 
+          <label>
+            密码
+            <input v-model="password" type="password" required :minlength="modal === 'login' ? 1 : 8" maxlength="128"
+              :autocomplete="modal === 'login' ? 'current-password' : 'new-password'"
+              :placeholder="modal === 'login' ? '输入密码' : '至少 8 位字符'"
+            />
+          </label>
+ 
+          <label v-if="modal === 'register'">
+            确认密码
+            <input v-model="confirmPassword" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="再次输入密码" />
+          </label>
+ 
+          <label v-if="modal === 'reset'">
+            新密码
+            <input v-model="confirmPassword" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="至少 8 位" />
+          </label>
+ 
+          <label v-if="modal === 'register'" class="phone-label">
+            手机号（选填）
+            <input v-model="phone" type="tel" autocomplete="tel" maxlength="16" pattern="[+]?[0-9]{7,15}" placeholder="可留空，如 13800138000" />
+          </label>
+ 
+          <p v-if="modalError" class="form-error" role="alert">{{ modalError }}</p>
+ 
+          <button class="primary-button full-width" :disabled="modalBusy">
+            <LoaderCircle v-if="modalBusy" class="spin" :size="16" />
+            {{ modalBusy ? '请稍候…' : modal === 'login' ? '登录' : modal === 'reset' ? '重置密码' : '创建账号' }}
+            <ArrowRight v-if="!modalBusy" :size="16" />
           </button>
-          <div class="auth-switch">
-            {{ modal === 'login' ? '还没有账号？' : '已经有账号？'
-            }}<button
-              class="text-button"
-              :disabled="modalBusy"
-              @click="openModal(modal === 'login' ? 'register' : 'login')"
-            >
-              {{ modal === 'login' ? '立即注册' : '去登录' }}
-            </button>
-          </div></template
-        >
-        <template v-else-if="modal === 'project'"
-          ><h2>一个项目，一次新的探索。</h2>
-          <p>按课程、论文主题或研究方向整理你的资料。</p>
-          <form @submit.prevent="createProject">
-            <label
-              >项目名称<input
-                v-model="projectName"
-                required
-                maxlength="100"
-                placeholder="例如：大语言模型文献研究"
-                autofocus
-            /></label>
-            <p v-if="modalError" class="form-error" role="alert">{{ modalError }}</p>
-            <button class="primary-button full-width" :disabled="modalBusy || !projectName.trim()">
-              <LoaderCircle v-if="modalBusy" class="spin" :size="16" />创建项目<ArrowRight
-                :size="16"
-              />
-            </button></form
-        ></template>
-        <template v-else-if="modal === 'help'"
-          ><h2>从资料到理解，只需三步。</h2>
-          <ol class="help-steps">
-            <li>
-              <strong>创建研究项目</strong>
-              <p>注册或登录后，为一个研究主题建立项目。</p>
-            </li>
-            <li>
-              <strong>上传你的资料</strong>
-              <p>支持 PDF、TXT、DOCX 和 PPTX。等待状态变为“已就绪”后即可提问。</p>
-            </li>
-            <li>
-              <strong>提问、追问与核实</strong>
-              <p>
-                在同一对话内继续追问，点击引用查看证据。右侧勾选文件可缩小范围，问答设置中可以附带原文。
-              </p>
-            </li>
-          </ol>
-          <p>
-            刷新后可从“历史与任务”打开已保存的会话并继续提问，也可导出
-            Markdown。后台问答任务可在任务列表中查看结果或重试。
-          </p>
-          <button class="primary-button full-width" @click="closeModal">
-            开始探索 <ArrowRight :size="16" /></button
-        ></template>
-      </div>
-    </dialog>
-  </div>
+        </form>
+        <button v-if="modal === 'login'" class="text-button" :disabled="modalBusy" @click="openModal('reset')">忘记密码？</button>
+        <div class="auth-switch">
+          {{ modal === 'login' ? '还没有账号？' : '已经有账号？' }}
+          <button class="text-button" :disabled="modalBusy" @click="openModal(modal === 'login' ? 'register' : 'login')">{{ modal === 'login' ? '立即注册' : '去登录' }}</button>
+        </div>
+      </template>
+      <template v-else-if="modal === 'project'"
+        ><h2>一个项目，一次新的探索。</h2>
+        <p>按课程、论文主题或研究方向整理你的资料。</p>
+        <form @submit.prevent="createProject">
+          <label>项目名称<input v-model="projectName" required maxlength="100" placeholder="例如：大语言模型文献研究" autofocus /></label>
+          <p v-if="modalError" class="form-error" role="alert">{{ modalError }}</p>
+          <button class="primary-button full-width" :disabled="modalBusy || !projectName.trim()"><LoaderCircle v-if="modalBusy" class="spin" :size="16" />创建项目<ArrowRight :size="16" /></button>
+        </form>
+      </template>
+      <template v-else-if="modal === 'help'"
+        ><h2>从资料到理解，只需三步。</h2>
+        <ol class="help-steps"><li><strong>创建研究项目</strong><p>注册或登录后，为一个研究主题建立项目。</p></li><li><strong>上传你的资料</strong><p>支持 PDF、TXT、DOCX 和 PPTX。等待状态变为已就绪后即可提问。</p></li><li><strong>提问、追问与核实</strong><p>在同一对话内继续追问，点击引用查看证据。右侧勾选文件可缩小范围，问答设置中可以附带原文。</p></li></ol>
+        <p>刷新后可从历史与任务打开已保存的会话并继续提问，也可导出 Markdown。后台问答任务可在任务列表中查看结果或重试。</p>
+        <button class="primary-button full-width" @click="closeModal">开始探索 <ArrowRight :size="16" /></button>
+      </template>
+    </div>
+  </dialog>
 </template>

@@ -25,12 +25,12 @@
   margin-bottom: 8px;
 }
 .feature-card p {
-  color: #66756e;
+  color: #666;
   line-height: 1.7;
   margin: 8px 0;
 }
 .feature-card small {
-  color: #718078;
+  color: #777;
   font-weight: 400;
 }
 .feature-card summary {
@@ -60,7 +60,7 @@
 .saved-timetable select {
   width: 100%;
   min-height: 38px;
-  border: 1px solid #cdd8d1;
+  border: 1px solid #d4d4d4;
   border-radius: 7px;
   background: white;
   padding: 8px 10px;
@@ -83,7 +83,7 @@
 .feature-notice,
 .feature-warning {
   padding: 12px 16px;
-  background: #edf4ef;
+  background: #f0f0f0;
   border-radius: 8px;
   line-height: 1.7;
   margin: 12px 0;
@@ -95,7 +95,7 @@
 }
 .empty-feature {
   padding: 24px 0;
-  color: #69776f;
+  color: #707070;
 }
 .pagination {
   display: flex;
@@ -137,7 +137,7 @@
 }
 .school-tool-settings small {
   flex-basis: 100%;
-  color: #69776f;
+  color: #707070;
   font-size: 11px;
 }
 .saved-grid {
@@ -147,7 +147,7 @@
 }
 .saved-grid .feature-card {
   margin: 0;
-  background: #f8faf7;
+  background: #f7f7f7;
 }
 .saved-timetable {
   margin: 28px 0;
@@ -162,7 +162,7 @@
   padding: 12px 4px;
 }
 .history-row span {
-  color: #718078;
+  color: #777;
   font-size: 12px;
 }
 .project-activity {
@@ -171,7 +171,7 @@
 .job-id {
   display: block;
   overflow-wrap: anywhere;
-  color: #758078;
+  color: #787878;
   font-size: 11px;
   margin: 8px 0;
 }
@@ -203,13 +203,270 @@
   overflow: auto;
   margin: 10px 0;
   padding: 10px;
-  background: #f5f7f3;
+  background: #f5f5f5;
 }
 .plain-content {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   max-height: 300px;
   overflow: auto;
+}
+/* ========== documents-panel tab bar ========== */
+.panel-tabs {
+  display: flex;
+  gap: 0;
+  padding: 0 10px;
+  border-bottom: 1px solid #e8e8e8;
+  background: #fafafa;
+  flex-shrink: 0;
+}
+.panel-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #6b6b6b;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 100%;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  font-family: inherit;
+}
+.panel-tab:hover {
+  color: #222;
+  background: #f0f0f0;
+}
+.panel-tab.active {
+  color: #222;
+  border-bottom-color: #222;
+  background: transparent;
+}
+.panel-tab.viewer-tab {
+  flex-shrink: 1;
+  min-width: 0;
+}
+.tab-filename {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+  display: inline-block;
+}
+.tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  margin-left: 2px;
+  color: #888;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+}
+.tab-close:hover {
+  background: #e0e0e0;
+  color: #222;
+}
+ 
+/* ========== DocumentViewer (full-height tab content) ========== */
+.document-viewer {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: #f3f3f3;
+  overflow: hidden;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.viewer-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: #fafafa;
+  border-bottom: 1px solid #e8e8e8;
+  flex-shrink: 0;
+  gap: 8px;
+}
+.viewer-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.viewer-docname {
+  font-size: 12px;
+  font-weight: 500;
+  color: #444;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.viewer-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.zoom-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: #fff;
+  color: #444;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.zoom-btn:hover:not(:disabled) {
+  background: #f4f4f4;
+  border-color: #bbb;
+  color: #222;
+}
+.zoom-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+/* 手掌按钮 active 状态 */
+.zoom-btn.pan-toggle.active {
+  background: #222;
+  border-color: #222;
+  color: #fff;
+}
+.zoom-btn.pan-toggle.active:hover {
+  background: #333;
+  border-color: #333;
+  color: #fff;
+}
+ 
+/* 手掌拖动模式的 cursor 和禁止文本选择 */
+.viewer-host.pan-mode {
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.viewer-host.pan-mode.is-grabbing {
+  cursor: grabbing;
+}
+.viewer-host.pan-mode .textLayer,
+.viewer-host.pan-mode canvas {
+  pointer-events: none;
+}
+.zoom-pct {
+  font-size: 11px;
+  font-weight: 500;
+  color: #555;
+  background: #fff;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  padding: 3px 8px;
+  cursor: pointer;
+  font-family: inherit;
+  min-width: 46px;
+  text-align: center;
+  transition: background 0.12s, border-color 0.12s;
+}
+.zoom-pct:hover {
+  background: #f4f4f4;
+  border-color: #bbb;
+}
+ 
+.viewer-host {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  width: 100%;
+  padding: 16px;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  box-sizing: border-box;
+}
+.viewer-page {
+  position: relative;
+  background: white;
+  box-shadow: 0 1px 6px #0000001a;
+  margin: 0;
+  height: auto !important;
+  flex-shrink: 0;
+  /* width/height 由 JS 内联设置 */
+}
+.viewer-page > canvas {
+  display: block;
+  border-radius: 1px;
+}
+.viewer-page .textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  text-align: initial;
+  line-height: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  z-index: 0;
+  --min-font-size: 1;
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+}
+.viewer-page .textLayer span,
+.viewer-page .textLayer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.viewer-page .textLayer > :not(.markedContent),
+.viewer-page .textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  --scale-x: 1;
+  --rotate: 0deg;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.viewer-page .textLayer .markedContent {
+  display: contents;
+}
+.viewer-page .textLayer ::selection {
+  background: #f4dc8466;
+}
+.viewer-host .docx-wrapper {
+  width: 100%;
+  padding: 0;
+  background: transparent;
+}
+.viewer-host .docx-wrapper > section.docx {
+  margin: 0 auto;
+  box-shadow: 0 1px 4px #00000014;
+}
+.viewer-hint {
+  font-size: 11px;
+  color: #8a8a8a;
+  line-height: 1.8;
+  margin: 0;
 }
 @media (max-width: 760px) {
   .feature-page {
