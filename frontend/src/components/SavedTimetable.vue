@@ -24,7 +24,7 @@ const weekdays = [['Mon', '周一'], ['Tue', '周二'], ['Wed', '周三'], ['Thu
  
 /* 展开行：null 表示全部收起；mode 控制该行下方显示什么面板 */
 const expandedRow = ref<Schedule | null>(null)
-type ExpandMode = 'term' | 'time' | 'delete' | null
+type ExpandMode = 'term' | 'delete' | null
 const expandedMode = ref<ExpandMode>(null)
 function toggleExpand(row: Schedule, mode: ExpandMode) {
   if (expandedRow.value?.id === row.id && expandedMode.value === mode) {
@@ -100,8 +100,12 @@ async function deleteEntry() {
   finally { saving.value = false }
 }
  
-/* 学期设置表单（按行展开） */
+/* 设置表单（按行展开）：时间地点 + 学期规则合并 */
 const form = ref({
+  day_of_week: 'Mon',
+  start_time: '09:00',
+  end_time: '10:00',
+  location: '',
   term_name: '',
   term_start: '',
   term_end: '',
@@ -113,6 +117,10 @@ function openTermForm(row: Schedule) {
   expandedRow.value = row
   expandedMode.value = 'term'
   form.value = {
+    day_of_week: String(row.day_of_week || 'Mon'),
+    start_time: row.start_time || '09:00',
+    end_time: row.end_time || '10:00',
+    location: row.location || '',
     term_name: row.term_name || '',
     term_start: row.term_start || '',
     term_end: row.term_end || '',
@@ -126,9 +134,18 @@ function openTermForm(row: Schedule) {
 async function saveTerm(clear = false) {
   if (!expandedRow.value || saving.value) return
   const row = expandedRow.value
+  if (!clear && form.value.end_time <= form.value.start_time) { message.value = '结束时间必须晚于开始时间。'; return }
   saving.value = true
   message.value = ''
   try {
+    if (!clear) {
+      const { day_of_week, start_time, end_time, location } = form.value
+      await request(`/timetable/entries/${row.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ day_of_week, start_time, end_time, location }),
+      })
+    }
     await request(`/timetable/${row.id}/calendar`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -147,7 +164,8 @@ async function saveTerm(clear = false) {
     })
     if (!alive) return
     closeExpand()
-    message.value = clear ? '已恢复为每周安排。' : '学期规则已保存。'
+    message.value = clear ? '已恢复为每周安排。' : '设置已保存。'
+    emit('changed')
     await load()
   } catch (e) {
     if (alive) emit('error', e)
@@ -246,17 +264,21 @@ onMounted(load)
               </div>
             </div>
             <div class="saved-row-actions">
-              <button class="row-btn" :disabled="saving" @click="openTermForm(row)">设置学期</button>
-              <button class="row-btn" :disabled="saving" @click="toggleExpand(row, 'term')">单双周</button>
-              <button class="row-btn" :disabled="saving" @click="openEntry(row)">修改时间地点</button>
+              <button class="row-btn" :disabled="saving" @click="openTermForm(row)">设置</button>
               <button class="row-btn row-btn-danger" :disabled="saving" @click="toggleExpand(row, 'delete')">删除</button>
             </div>
           </div>
  
-          <!-- 该行下方展开：学期设置 -->
+          <!-- 该行下方展开：设置（时间地点 + 学期规则） -->
           <div v-if="expandedRow?.id === row.id && expandedMode === 'term'" class="row-expand">
             <form class="inline-form" @submit.prevent="saveTerm()">
-              <h4>设置学期与单双周</h4>
+              <h4>课程设置</h4>
+              <div class="field-row">
+                <label>上课星期<select v-model="form.day_of_week" :disabled="saving"><option v-for="day in weekdays" :key="day[0]" :value="day[0]">{{ day[1] }}</option></select></label>
+                <label>开始时间<input v-model="form.start_time" type="time" required :disabled="saving" /></label>
+                <label>结束时间<input v-model="form.end_time" type="time" required :disabled="saving" /></label>
+                <label>上课地点<input v-model="form.location" maxlength="500" :disabled="saving" /></label>
+              </div>
               <div class="field-row">
                 <label>学期名称<input v-model="form.term_name" maxlength="100" /></label>
                 <label>学期开始<input v-model="form.term_start" type="date" required /></label>
@@ -271,17 +293,23 @@ onMounted(load)
                   <option value="even">双周</option>
                 </select></label>
               </div>
-              <button class="primary-button" :disabled="saving">保存学期规则</button>
-              <button type="button" class="subtle-button" :disabled="saving" @click="saveTerm(true)">清除</button>
-              <button type="button" class="text-button" :disabled="saving" @click="closeExpand">收起</button>
+              <div class="form-actions">
+                <button class="primary-button" :disabled="saving">保存</button>
+                <button type="button" class="subtle-button" :disabled="saving" @click="saveTerm(true)">清除</button>
+              </div>
+              <div class="form-actions form-actions-secondary">
+                <button type="button" class="text-button" :disabled="saving" @click="closeExpand">收起</button>
+              </div>
             </form>
           </div>
- 
+
           <!-- 该行下方展开：删除确认 -->
           <div v-if="expandedRow?.id === row.id && expandedMode === 'delete'" class="row-expand row-expand-danger">
             <p>删除「{{ row.course_name }}」{{ { Mon:'周一', Tue:'周二', Wed:'周三', Thu:'周四', Fri:'周五', Sat:'周六', Sun:'周日' }[row.day_of_week] }} {{ row.start_time }}–{{ row.end_time }} 的安排？课程资料和其他时段会保留。</p>
-            <button class="row-btn row-btn-danger" :disabled="saving" @click="deleteEntry">确认删除</button>
-            <button type="button" class="text-button" :disabled="saving" @click="closeExpand">取消</button>
+            <div class="delete-actions">
+              <button class="row-btn row-btn-danger" :disabled="saving" @click="deleteEntry">确认删除</button>
+              <button type="button" class="row-btn" :disabled="saving" @click="closeExpand">取消</button>
+            </div>
           </div>
         </article>
       </template>

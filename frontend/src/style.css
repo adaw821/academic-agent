@@ -1917,7 +1917,29 @@ textarea {
   margin: 0 0 10px;
   color: #2d3748;
 }
+/* 内联表单按钮行：保存+清除同行，收起单独一行 */
+.inline-form .form-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+.inline-form .form-actions-secondary {
+  margin-top: 14px;
+}
+/* 清除按钮放大到与保存一致，但保留白底浅字 */
+.inline-form .form-actions .subtle-button {
+  justify-content: center;
+  padding: 11px 17px;
+  font-size: 12px;
+  border-radius: 6px;
+}
 .row-expand-danger { background: #fdf5f4; }
+.delete-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .row-expand-danger p {
   margin: 0 0 10px;
   font-size: 12px;
