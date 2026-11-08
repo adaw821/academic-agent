@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { request, post, statusLabel, localTime, type PageResult, type Job } from '../api'
 const props = defineProps<{ projectId: number; locked: boolean }>()
-const emit = defineEmits<{ error: [unknown]; conversation: [number]; refresh: [] }>()
+const emit = defineEmits<{ error: [unknown]; conversation: [number]; refresh: []; deleted: [number] }>()
 interface Conversation {
   id: number
   title: string | null
@@ -15,6 +15,8 @@ const tab = ref<'history' | 'jobs'>('history'),
   error = ref('')
 const history = ref<PageResult<Conversation>>({ items: [], total: 0 }),
   jobs = ref<PageResult<Job>>({ items: [], total: 0 })
+/** 正在二次确认删除的会话 id */
+const pendingDelete = ref<number | null>(null)
 let alive = true,
   token = 0,
   timer: ReturnType<typeof setTimeout> | undefined
@@ -78,6 +80,26 @@ async function retry(job: Job) {
     busy.value = false
   }
 }
+async function remove(item: Conversation) {
+  busy.value = true
+  error.value = ''
+  try {
+    await request(`/projects/${props.projectId}/conversations/${item.id}`, { method: 'DELETE' })
+    if (!alive) return
+    pendingDelete.value = null
+    // 删掉的正好是当前页最后一条时回退一页，避免停在空页
+    if (history.value.items.length === 1 && offset.value > 0) offset.value -= 20
+    await load()
+    if (alive) emit('deleted', item.id)
+  } catch (e) {
+    if (alive) {
+      error.value = '删除会话失败，请重试。'
+      emit('error', e)
+    }
+  } finally {
+    busy.value = false
+  }
+}
 async function openResult(job: Job) {
   busy.value = true
   try {
@@ -101,16 +123,33 @@ async function openResult(job: Job) {
     <p v-if="busy" role="status">正在读取或更新…</p>
     <template v-if="tab === 'history'"
       ><p v-if="!busy && !history.items.length">暂无已保存会话。</p>
-      <button
-        v-for="item in history.items"
-        :key="item.id"
-        class="history-row"
-        :disabled="locked || busy"
-        @click="emit('conversation', item.id)"
-      >
-        <strong>{{ item.title || '未命名会话' }}</strong
-        ><span>{{ item.message_count }} 条消息 · {{ localTime(item.updated_at) }}</span>
-      </button></template
+      <div v-for="item in history.items" :key="item.id" class="history-item">
+        <div class="history-item-head">
+          <button
+            class="history-row"
+            :disabled="locked || busy"
+            @click="emit('conversation', item.id)"
+          >
+            <strong>{{ item.title || '未命名会话' }}</strong
+            ><span>{{ item.message_count }} 条消息 · {{ localTime(item.updated_at) }}</span>
+          </button>
+          <button
+            class="history-delete"
+            :disabled="locked || busy"
+            :aria-label="`删除会话：${item.title || '未命名会话'}`"
+            @click="pendingDelete = pendingDelete === item.id ? null : item.id"
+          >
+            删除
+          </button>
+        </div>
+        <div v-if="pendingDelete === item.id" class="inline-confirm">
+          <p>
+            删除“{{ item.title || '未命名会话' }}”及其 {{ item.message_count }} 条消息？该会话写入文件的批注也会一并撤销。
+          </p>
+          <button class="subtle-button" :disabled="busy" @click="remove(item)">确认删除会话</button
+          ><button class="text-button" :disabled="busy" @click="pendingDelete = null">取消</button>
+        </div>
+      </div></template
     >
     <template v-else
       ><p v-if="!busy && !jobs.items.length">暂无任务。</p>

@@ -16,7 +16,7 @@ const busy = ref(false),
   confirmRestart = ref(false)
 const nativeView = computed(() => {
   const ext = props.document.filename.split('.').pop()?.toLowerCase() ?? ''
-  return ['pdf', 'docx'].includes(ext)
+  return ['pdf', 'docx', 'ppt', 'pptx'].includes(ext)
 })
 let alive = true
 onUnmounted(() => {

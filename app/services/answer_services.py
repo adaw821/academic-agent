@@ -1,5 +1,6 @@
 from app.services.performance import measure_stage, timed_stage, logger as performance_logger
 import os
+import re
 import json
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -15,6 +16,57 @@ from sqlalchemy import select
 CONTEXT_LIMIT = 32_768
 RESERVED_OUTPUT_TOKENS = 8_192
 SAFETY_MARGIN = 1_024
+
+# 高亮锚点：返回给前端的子块文本上限 / 计算重合度用的字符 n-gram 长度
+MAX_ANCHOR_CHARS = 1500
+ANCHOR_GRAM = 6
+
+
+def _grams(text: str) -> set[str]:
+    compact = re.sub(r"\s+", "", text or "").lower()
+    if not compact:
+        return set()
+    if len(compact) <= ANCHOR_GRAM:
+        return {compact}
+    return {compact[i:i + ANCHOR_GRAM] for i in range(len(compact) - ANCHOR_GRAM + 1)}
+
+
+def _best_anchor(db: Session, item: dict, answer: str) -> str | None:
+    """在命中的父块里挑与回答重合度最高的子块，作为高亮锚点。
+
+    重排只保留每个父块里分数最高的那个子块，而它未必是回答真正用到的段落
+    （问 Exercise 2 的 schema 时，最高分子块可能是 Exercise 1 的收尾句）。
+    回答通常会复述被抓取的原文，因此按字符 n-gram 覆盖率改选最贴合的子块。
+    """
+    fallback = (item.get("child_content") or "").strip()
+    parent_id = item.get("parent_id")
+    if not parent_id:
+        return fallback[:MAX_ANCHOR_CHARS] or None
+    try:
+        from app.models.document_child import Child
+
+        children = db.query(Child).filter(Child.parent_id == parent_id).all()
+    except Exception:
+        return fallback[:MAX_ANCHOR_CHARS] or None
+
+    contents = [c for c in ((child.content or "").strip() for child in children) if c]
+    if not contents:
+        return fallback[:MAX_ANCHOR_CHARS] or None
+    if len(contents) == 1:
+        return contents[0][:MAX_ANCHOR_CHARS]
+
+    target = _grams(answer)
+    if not target:
+        return (fallback or contents[0])[:MAX_ANCHOR_CHARS]
+    best, best_score = (fallback or contents[0]), 0.0
+    for content in contents:
+        grams = _grams(content)
+        if not grams:
+            continue
+        score = len(target & grams) / len(grams)
+        if score > best_score:
+            best, best_score = content, score
+    return best[:MAX_ANCHOR_CHARS] or None
 
 llm = ChatOpenAI(
     model = "glm-5.3",
@@ -234,8 +286,11 @@ def generate_answer(
     if not isinstance(response.content, str) or not response.content.strip():
         raise HTTPException(status_code=502, detail="回答模型未返回有效文本，本轮问答未保存。")
 
+    answer_text = response.content
+    anchors = [_best_anchor(db, item, answer_text) for item in final_chunks]
+
     return {
-        "answer": response.content,
+        "answer": answer_text,
         "retrieved_contexts": [item["parent_content"] for item in final_chunks],
         "sources": [
             {
@@ -247,6 +302,9 @@ def generate_answer(
                 "heading_path": item.get("heading_path"),
                 "page_numbers": item.get("page_numbers"),
                 "child_page_numbers": item.get("child_page_numbers"),
+                # 锚点子块：前端据它定位高亮。父块常跨多个小节（如 Exercise 1~3），
+                # 直接用父块匹配会永远亮到第一段，位置对不上。
+                "child_content": anchors[index - 1],
             }
             for index, item in enumerate(final_chunks, start=1)
         ],

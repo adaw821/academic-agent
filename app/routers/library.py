@@ -1,7 +1,9 @@
 """Authenticated history, document lifecycle and durable QA APIs."""
 import json
+import logging
 from pathlib import Path
 import shutil
+import threading
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
@@ -24,6 +26,58 @@ from app.services.durable_workflows import new_run, run_workflow, recover_delete
 
 router = APIRouter(tags=["library"])
 UPLOAD_ROOT = Path("data/uploads")
+logger = logging.getLogger("uvicorn.error")
+
+# 每个文档一把锁：同一份 PPT 被并发预览时只转换一次，避免写出半截 PDF。
+_preview_locks: dict[int, threading.Lock] = {}
+_preview_locks_guard = threading.Lock()
+
+
+def _preview_lock(document_id: int) -> threading.Lock:
+    with _preview_locks_guard:
+        lock = _preview_locks.get(document_id)
+        if lock is None:
+            lock = threading.Lock()
+            _preview_locks[document_id] = lock
+        return lock
+
+
+def _pdf_usable(path: Path) -> bool:
+    """粗校验 PDF 是否完整：至少要有头部与一定体积，防止返回转换中断的残留文件。"""
+    try:
+        if path.stat().st_size < 1024:
+            return False
+        with path.open("rb") as handle:
+            return handle.read(5) == b"%PDF-"
+    except OSError:
+        return False
+
+
+def ensure_preview_pdf(document, path: Path) -> Path | None:
+    """按需把 PPT/PPTX 转成同目录 PDF，供浏览器预览。
+
+    转换属于预览职责，不放在解析流程里（否则从不预览的课件也要白转一次）。
+    已有可用 PDF 直接复用；没有才转换；转换失败返回 None，调用方回退原始文件，
+    前端 pptx-preview 仍可渲染。
+    """
+    pdf_path = path.with_suffix(".pdf")
+    if _pdf_usable(pdf_path):
+        return pdf_path
+    if not path.is_file():
+        return None
+
+    with _preview_lock(document.id):
+        if _pdf_usable(pdf_path):  # 等锁期间别的请求已经转好
+            return pdf_path
+        try:
+            from app.services.ppt_preview import convert_to_pdf
+
+            converted = convert_to_pdf(path, timeout=90)
+        except Exception as exc:  # noqa: BLE001 - 转换失败不能影响预览请求
+            logger.warning("ppt_preview_error document=%s error=%s", document.id, exc)
+            return None
+
+    return converted if converted and _pdf_usable(converted) else None
 
 
 def project_access(db, project_id, user, *, lock=False):
@@ -104,6 +158,66 @@ def messages(project_id: int, conversation_id: int, limit: int = Query(100, ge=1
             "limit": limit, "offset": offset}
 
 
+@router.delete("/projects/{project_id}/conversations/{conversation_id}")
+def delete_conversation(project_id: int, conversation_id: int, db: Session = Depends(get_db),
+                        user: User = Depends(get_currentUser)):
+    """删除整段会话：消息、该会话写进文件的批注、已结束的问答任务记录。
+
+    批注是文件级的（同一文档可能被多个会话批注过），所以只删本会话产生的那几条，
+    删完再按剩余记录重建副本；没有剩余记录时 rebuild_copy 会直接清掉副本。
+    """
+    project_access(db, project_id, user)
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None or conversation.project_id != project_id:
+        raise HTTPException(404, "会话不存在")
+
+    message_ids = list(db.scalars(select(Message.id).where(
+        Message.conversation_id == conversation_id)))
+
+    touched: set[int] = set()
+    if message_ids:
+        try:
+            from app.models.document_annotation import DocumentAnnotation
+            touched = {document_id for document_id in db.scalars(select(
+                DocumentAnnotation.document_id).where(
+                DocumentAnnotation.message_id.in_(message_ids)).distinct()) if document_id}
+            with db.begin_nested():
+                db.execute(delete(DocumentAnnotation).where(
+                    DocumentAnnotation.message_id.in_(message_ids)))
+        except Exception:  # 批注表尚未创建时忽略，不影响会话删除
+            touched = set()
+
+    db.execute(delete(Message).where(Message.conversation_id == conversation_id))
+    db.delete(conversation)
+
+    # 只清理已结束的任务记录；排队/运行中的保留，避免打断后台执行
+    try:
+        with db.begin_nested():
+            db.execute(delete(WorkflowRun).where(
+                WorkflowRun.project_id == project_id, WorkflowRun.kind == "qa",
+                WorkflowRun.request.op("->>")("conversation_id") == str(conversation_id),
+                WorkflowRun.status.notin_(("queued", "running"))))
+    except Exception:
+        pass
+
+    db.commit()
+
+    for document_id in touched:
+        try:
+            from app.models.document_annotation import DocumentAnnotation
+            from app.services import annotation_services as svc
+            document = db.get(Document, document_id)
+            if document is None:
+                continue
+            rows = list(db.scalars(select(DocumentAnnotation).where(
+                DocumentAnnotation.document_id == document_id).order_by(DocumentAnnotation.id)))
+            svc.rebuild_copy(document, rows)
+        except Exception:
+            continue
+
+    return {"conversation_id": conversation_id, "deleted": True, "messages": len(message_ids)}
+
+
 @router.get("/projects/{project_id}/documents/{document_id}/content")
 def document_content(project_id: int, document_id: int, db: Session = Depends(get_db),
                      user: User = Depends(get_currentUser)):
@@ -118,12 +232,27 @@ def document_content(project_id: int, document_id: int, db: Session = Depends(ge
 
 
 @router.get("/projects/{project_id}/documents/{document_id}/file")
-def document_file(project_id: int, document_id: int, db: Session = Depends(get_db),
+def document_file(project_id: int, document_id: int, preview: bool = Query(False),
+                  db: Session = Depends(get_db),
                   user: User = Depends(get_currentUser)):
     document = document_access(db, project_id, document_id, user)
     path = stored_path(document)
     if not path.is_file():
         raise HTTPException(404, "原文件不存在")
+
+    # 预览模式：PPT/PPTX 在首次预览时按需转成 PDF，之后直接复用同目录副本；
+    # 没有可用的渲染引擎或转换失败时回退原始文件。下载始终返回原始文件。
+    if preview and path.suffix.lower() in {".ppt", ".pptx"}:
+        pdf_path = ensure_preview_pdf(document, path)
+        if pdf_path is not None and pdf_path.resolve().is_relative_to(path.parent.resolve()):
+            return FileResponse(
+                pdf_path,
+                filename=Path(document.filename).with_suffix(".pdf").name,
+                media_type="application/pdf",
+                headers={"X-Content-Type-Options": "nosniff",
+                         "Cache-Control": "private, no-store"},
+            )
+
     return FileResponse(path, filename=document.filename, media_type=document.content_type,
                         headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"})
 
@@ -195,6 +324,21 @@ def delete_document(project_id: int, document_id: int, db: Session = Depends(get
             if source.exists():
                 target = trash / source.name
                 source.rename(target)
+        # AI 批注副本与记录一并清理（表可能尚未创建，失败不影响删除）
+        try:
+            from app.services.annotation_services import annotated_path
+            annotated = annotated_path(document)
+            if annotated.is_file():
+                annotated.unlink()
+        except Exception:
+            pass
+        try:
+            from app.models.document_annotation import DocumentAnnotation
+            with db.begin_nested():
+                db.execute(delete(DocumentAnnotation).where(
+                    DocumentAnnotation.document_id == document_id))
+        except Exception:
+            pass
         clear_chunks(db, document_id)
         db.execute(delete(WorkflowRun).where(WorkflowRun.document_id == document_id))
         invalidate_failed_qa(db, project_id)
@@ -217,6 +361,83 @@ def delete_document(project_id: int, document_id: int, db: Session = Depends(get
     except OSError:
         pending = True
     return {"document_id": document_id, "deleted": True, "cleanup_pending": pending}
+
+
+@router.delete("/projects/{project_id}")
+def delete_project(project_id: int, db: Session = Depends(get_db),
+                   user: User = Depends(get_currentUser)):
+    """删除整个项目：文档文件、检索块、批注、全部会话与任务记录。
+
+    文件先挪进回收目录（与删除文档同款），事务提交成功后再真正清掉；
+    中途失败走 recover_deleted_files 找回。
+    """
+    project_access(db, project_id, user, lock=True)
+    busy_document = db.scalar(select(func.count()).select_from(Document).where(
+        Document.project_id == project_id, Document.status.in_(("queued", "processing"))))
+    busy_qa = db.scalar(select(WorkflowRun.id).where(
+        WorkflowRun.project_id == project_id, WorkflowRun.kind == "qa",
+        WorkflowRun.status.in_(("queued", "running"))).limit(1))
+    if busy_document or busy_qa:
+        raise HTTPException(409, "项目内有文档或问答任务正在处理，稍后再删")
+
+    document_rows = list(db.scalars(select(Document).where(Document.project_id == project_id)))
+    trash = UPLOAD_ROOT.resolve() / ".trash" / uuid4().hex
+    trash.mkdir(parents=True)
+    moved: list[str] = []
+    for document in document_rows:
+        try:
+            sources = [stored_path(document), stored_path(document).with_suffix(".images")]
+        except HTTPException:
+            continue
+        for source in sources:
+            if source.exists():
+                source.rename(trash / f"doc_{document.id}_{source.name}")
+                moved.append(source.name)
+        try:
+            from app.services.annotation_services import annotated_path
+            annotated = annotated_path(document)
+            if annotated.is_file():
+                annotated.rename(trash / f"annotated_{document.id}_{annotated.name}")
+                moved.append(annotated.name)
+        except Exception:
+            pass
+    (trash / "manifest.json").write_text(json.dumps(
+        {"project_id": project_id, "files": moved}), encoding="utf-8")
+
+    try:
+        for document in document_rows:
+            clear_chunks(db, document.id)
+        try:
+            from app.models.document_annotation import DocumentAnnotation
+            with db.begin_nested():
+                db.execute(delete(DocumentAnnotation).where(
+                    DocumentAnnotation.project_id == project_id))
+        except Exception:
+            pass
+        conversation_ids = list(db.scalars(select(Conversation.id).where(
+            Conversation.project_id == project_id)))
+        if conversation_ids:
+            db.execute(delete(Message).where(Message.conversation_id.in_(conversation_ids)))
+            db.execute(delete(Conversation).where(Conversation.id.in_(conversation_ids)))
+        db.execute(delete(WorkflowRun).where(WorkflowRun.project_id == project_id))
+        db.execute(delete(Document).where(Document.project_id == project_id))
+        db.execute(delete(Project).where(Project.id == project_id))
+        db.commit()
+    except Exception:
+        db.rollback()
+        try:
+            recover_deleted_files()
+        except Exception:
+            pass
+        raise
+    pending = False
+    try:
+        shutil.rmtree(trash)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pending = True
+    return {"project_id": project_id, "deleted": True, "cleanup_pending": pending}
 
 
 @router.post("/projects/{project_id}/ask/jobs", status_code=202)

@@ -152,14 +152,38 @@
 .saved-timetable {
   margin: 28px 0;
 }
+.history-item {
+  border-bottom: 1px solid var(--border);
+}
+.history-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .history-row {
   display: flex;
   flex-direction: column;
   gap: 6px;
   text-align: left;
-  width: 100%;
-  border-bottom: 1px solid var(--border);
+  flex: 1;
+  min-width: 0;
   padding: 12px 4px;
+}
+/* 平时淡显、悬停变红：既看得见又不抢戏 */
+.history-delete {
+  flex: none;
+  padding: 4px 6px;
+  font-size: 11px;
+  line-height: 1;
+  color: #b3b3b3;
+  background: transparent;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+.history-delete:hover:not(:disabled),
+.history-delete:focus-visible {
+  color: #a54b43;
+  background: #fdf3f1;
 }
 .history-row span {
   color: #777;
@@ -194,6 +218,9 @@
 }
 .inline-confirm button {
   margin-top: 8px;
+}
+.history-item .inline-confirm {
+  margin: 0 0 12px;
 }
 .danger-text {
   color: #a54b43;
@@ -462,11 +489,200 @@
   margin: 0 auto;
   box-shadow: 0 1px 4px #00000014;
 }
+/* ===== 引用高亮 ===== */
+/* 回答正文里的 [n] 引用角标（由 answerHtml 生成的可点击按钮） */
+.cite-ref {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  margin: 0 2px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 4px;
+  background: #f0f0f0;
+  color: #4a4a4a;
+  font-size: 10px;
+  line-height: 1;
+  vertical-align: 2px;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.cite-ref:hover {
+  background: #1c1c1c;
+  color: #fff;
+}
+/* 预览器里被引原文的高亮 */
+/* 半透明荧光笔色：PDF 的文字画在下层 canvas，不透明底色会把字盖住 */
+mark.cite-hit {
+  background: rgba(244, 220, 132, 0.45);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.04);
+  transition: background 0.25s ease;
+}
+mark.cite-hit.is-focus {
+  background: rgba(255, 176, 32, 0.6);
+}
+/* 预览器顶部的引用定位条 */
+.cite-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: #fbfbfb;
+  overflow-x: auto;
+}
+.cite-nav-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #8a8a8a;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.cite-nav-missed {
+  padding: 8px 10px;
+}
+.cite-nav-missed .cite-nav-label {
+  white-space: normal;
+  line-height: 1.4;
+}
+.cite-nav-btn {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid #e3e3e3;
+  border-radius: 4px;
+  background: #fff;
+  color: #4a4a4a;
+  font-size: 10px;
+  line-height: 1;
+}
+.cite-nav-btn:hover {
+  border-color: #1c1c1c;
+  color: #1c1c1c;
+}
+.cite-nav-btn.active {
+  background: #1c1c1c;
+  border-color: #1c1c1c;
+  color: #fff;
+}
+/* 已写入批注的引用编号 */
+.cite-nav-btn.is-noted:not(.active) {
+  border-color: #bfe0c9;
+  color: #1a7f4b;
+  background: #f4fbf6;
+}
+.cite-nav-close {
+  margin-left: auto;
+  padding: 3px 8px;
+  border: 1px solid #e3e3e3;
+  border-radius: 4px;
+  background: #fff;
+  color: #8a8a8a;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.cite-nav-close:hover {
+  border-color: #1c1c1c;
+  color: #1c1c1c;
+}
+/* 导航条上的文字版「写入批注」：只作用于当前选中的引用 */
+.cite-nav-write {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid #bfd9ea;
+  border-radius: 4px;
+  background: #f2f8fc;
+  color: #0066a4;
+  font-size: 10px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.cite-nav-write:hover:not(:disabled) {
+  background: #e4f1f9;
+  border-color: #0066a4;
+}
+.cite-nav-write:disabled {
+  border-color: #e3e3e3;
+  background: #f5f5f5;
+  color: #b5b5b5;
+  cursor: not-allowed;
+}
+/* 预览顶栏的“加入批注 / 带批注版本” */
+.toolbar-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border: 1px solid #e3e3e3;
+  border-radius: 5px;
+  background: #fff;
+  color: #6b6b6b;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.toolbar-action:hover {
+  border-color: #0066a4;
+  color: #0066a4;
+  background: #f2f8fc;
+}
+.toolbar-action.is-primary {
+  border-color: #bfd9ea;
+  background: #f2f8fc;
+  color: #0066a4;
+}
+.toolbar-action.is-primary:hover {
+  border-color: #0066a4;
+  background: #e4f1f9;
+}
+.toolbar-action:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
 .viewer-hint {
   font-size: 11px;
   color: #8a8a8a;
   line-height: 1.8;
   margin: 0;
+}
+.viewer-hint-inline {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+  font-size: 14px;
+  background: #fafafa;
+  border: 1px dashed #d9d9d9;
+  border-radius: 10px;
+  margin: 12px;
+}
+/* PPT 无 PDF 转换引擎时的纯前端预览（pptx-preview 备选方案） */
+.viewer-pptx {
+  padding: 8px 12px 24px;
+}
+.viewer-pptx > div {
+  margin: 0 auto 12px;
+  background: #fff;
+  box-shadow: 0 1px 6px #0000001a;
+}
+/* PPT 无 PDF 转换引擎时的文字兜底预览 */
+.viewer-text {
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 28px 32px;
+  box-sizing: border-box;
+  background: #fff;
+  box-shadow: 0 1px 6px #0000001a;
 }
 @media (max-width: 760px) {
   .feature-page {

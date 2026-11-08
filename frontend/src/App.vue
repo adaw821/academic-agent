@@ -30,6 +30,8 @@ import {
   Send,
   Settings2,
   Sparkles,
+  Square,
+  Trash2,
   Upload,
   X,
 } from 'lucide-vue-next'
@@ -43,9 +45,12 @@ import DocumentViewer from './components/DocumentViewer.vue'
 import MISTimetable from './components/MISTimetable.vue'
 import {
   ApiError,
+  addAnnotation,
+  annotatedFileUrl,
   post,
   request,
   type Answer,
+  type CitationHighlight,
   type Course,
   type Document,
   type Project,
@@ -56,11 +61,22 @@ import {
   type HistoryMessage,
 } from './api'
  
+interface NoteState {
+  busy?: boolean
+  error?: string
+  total?: number
+  url?: string
+  filename?: string
+}
 interface Turn {
   question: string
   result?: Answer
   error?: string
   jobId?: string
+  /** 用户中途点了“停止”，这一轮不再等待回答 */
+  stopped?: boolean
+  /** 每条引用的文件批注状态，key 是引用编号 */
+  notes?: Record<number, NoteState>
 }
 interface Chat {
   turns: Turn[]
@@ -112,6 +128,13 @@ const savedTimetable = ref<InstanceType<typeof SavedTimetable>>()
 let historyRequest = 0
 let askTimer: ReturnType<typeof setTimeout> | undefined
 let wakeAsk: (() => void) | undefined
+/** 当前这轮问答的中止器：用户点“停止”时中断请求 */
+let askController: AbortController | null = null
+let askInterrupted = false
+/** 轮次序号：连点停止/重新提问时，避免旧请求回来把新状态覆盖掉 */
+let askSeq = 0
+/** 正在等待回答的那一轮，供“停止”立刻打标记 */
+let askingTurn: { chat: Chat; index: number } | null = null
 const filter = ref('')
 const query = ref('')
 const asking = ref(false)
@@ -231,7 +254,7 @@ onUnmounted(() => {
   clearTimeout(noticeTimer)
 })
 const connection = ref<'connecting' | 'online' | 'offline'>('connecting')
-const modal = ref<'login' | 'register' | 'reset' | 'project' | 'help' | null>(null)
+const modal = ref<'login' | 'register' | 'reset' | 'project' | 'help' | 'delete-project' | null>(null)
 const dialog = ref<HTMLDialogElement>()
 const modalError = ref('')
 const modalBusy = ref(false)
@@ -272,6 +295,7 @@ const composer = ref<HTMLTextAreaElement>()
 const messagesEnd = ref<HTMLElement>()
 const dragging = ref(false)
 const settingsOpen = ref(false)
+const scopeOpen = ref(false) // 输入框左下角"资料范围"小弹窗
 const recall = ref(40)
 const excerpt = ref('')
 const excerptDocument = ref<number | null>(null)
@@ -357,6 +381,8 @@ watch(modal, async (value) => {
   if (!value) {
     dialog.value?.close()
     password.value = ''
+    projectToDelete.value = null
+    modalError.value = ''
   }
 })
 function closeModal() {
@@ -370,8 +396,43 @@ function editQuestion(question: string) {
   query.value = question
   composer.value?.focus()
 }
-function openCitation(citation: Source, _text?: string) {
+// 预览器里的引用高亮：打开文档时传入，关闭文档时清空
+const viewerHighlights = ref<CitationHighlight[]>([])
+const viewerFocus = ref<number | null>(null)
+// 打开预览的那轮回答：预览器里的“写入批注/下载”要靠它拿到引用原文
+const viewerTurn = ref<Turn | null>(null)
+// 预览器顶栏“写入批注/下载”进行中
+const annotating = ref(false)
+// 当前预览里哪些引用已经写入过批注（逐条标记）
+const viewerAnnotatedIndices = computed(() => {
+  const turn = viewerTurn.value
+  if (!turn?.notes) return []
+  return viewerHighlights.value.filter((h) => turn.notes?.[h.index]?.url).map((h) => h.index)
+})
+// 点引用打开原文时，右栏至少要有这么宽才够阅读
+const VIEWER_MIN_WIDTH = 540
+
+function highlightOf(source: Source, text: string): CitationHighlight {
+  // 定位精度：命中的子块 > 回答引文 > 整块父内容（父块太长，开头内容会把名额占光）
+  const text_ = source.child_content || source.quote_text || text
+  return { index: source.index, text: text_, pages: source.page_numbers ?? [] }
+}
+
+function openCitation(
+  citation: Source,
+  _text?: string,
+  highlights?: CitationHighlight[],
+  turn?: Turn,
+) {
   const doc = documents.value.find((d) => d.id === citation.document_id)
+  // 右栏收起或太窄时，自动展开到适合阅读原文的宽度
+  if (documentsCollapsed.value) documentsCollapsed.value = false
+  if (documentsWidth.value < VIEWER_MIN_WIDTH)
+    documentsWidth.value = Math.min(MAX_DOCS, VIEWER_MIN_WIDTH)
+  viewerHighlights.value =
+    highlights ?? (_text ? [highlightOf(citation, _text)] : [])
+  viewerFocus.value = citation.index
+  viewerTurn.value = turn ?? null
   if (doc) {
     viewerDoc.value = doc
     mobileDocs.value = true
@@ -400,10 +461,174 @@ function citationGroups(turn: Turn): CitationGroup[] {
   })
   return [...groups.values()]
 }
-function openCitationGroup(group: CitationGroup) {
-  openCitation(group.items[0].citation, group.items[0].text || '未返回原文片段')
+function openCitationGroup(turn: Turn, group: CitationGroup) {
+  // 同一文档的多条引用一起高亮，焦点放在第一条
+  const highlights = group.items.map((it) => highlightOf(it.citation, it.text))
+  openCitation(group.items[0].citation, group.items[0].text || '未返回原文片段', highlights, turn)
 }
+
+/** 单轮回答指纹：同一轮重复点击复用结论；新一轮（问题或回答变了）覆盖旧批注 */
+function turnFingerprint(turn: Turn): string {
+  const raw = `${turn.question}\n${turn.result?.answer ?? ''}`
+  let hash = 0x811c9dc5
+  for (let i = 0; i < raw.length; i++) {
+    hash ^= raw.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return `${hash.toString(16)}${raw.length.toString(16)}`
+}
+
+/** 把这一条引用的一句话结论写进文件副本（Word 批注 / PDF 高亮 / PPT 备注） */
+async function writeAnnotation(turn: Turn, item: { citation: Source; text: string }) {
+  const projectId = activeId.value
+  const result = turn.result
+  if (!projectId || !result) return
+  const citeIndex = item.citation.index
+  const current = turn.notes?.[citeIndex]
+  if (current?.busy || current?.url) return
+  if (!turn.notes) turn.notes = {}
+  turn.notes[citeIndex] = { busy: true }
+  try {
+    const anchor = item.citation.child_content || item.citation.quote_text || item.text
+    const saved = await addAnnotation(projectId, item.citation.document_id, {
+      cite_index: citeIndex,
+      anchor_text: anchor || item.citation.filename,
+      question: turn.question,
+      answer: result.answer,
+      pages: item.citation.page_numbers ?? [],
+      turn_key: turnFingerprint(turn),
+    })
+    turn.notes[citeIndex] = {
+      total: saved.total,
+      url: annotatedFileUrl(projectId, item.citation.document_id),
+      filename: saved.filename,
+    }
+    notice.value = `已写入 AI 批注（该文件共 ${saved.total} 条）：${saved.filename}`
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '写入批注失败'
+    turn.notes[citeIndex] = { error: message }
+    notice.value = message
+  }
+}
+
+/** 预览器里点某条引用旁的便签：只把这一条写进文件副本 */
+async function annotateInViewer(index: number) {
+  const turn = viewerTurn.value
+  const result = turn?.result
+  if (!turn || !result || annotating.value) return
+  const position = result.sources.findIndex((s) => s.index === index)
+  if (position < 0) return
+  annotating.value = true
+  try {
+    await writeAnnotation(turn, {
+      citation: result.sources[position],
+      text: result.retrieved_contexts[position] || '',
+    })
+  } finally {
+    annotating.value = false
+  }
+}
+
+/** 预览器顶栏的「带批注版本」：直接下载已生成的副本，没有副本时给出提示 */
+async function downloadAnnotatedCopy() {
+  const projectId = activeId.value
+  const doc = viewerDoc.value
+  if (!projectId || !doc || annotating.value) return
+  try {
+    const response = await fetch(annotatedFileUrl(projectId, doc.id), { credentials: 'include' })
+    if (!response.ok) {
+      notice.value =
+        response.status === 404
+          ? '这份文件还没有 AI 批注副本，请先点引用编号旁的便签按钮加入批注'
+          : `下载失败（${response.status}）`
+      return
+    }
+    const blob = await response.blob()
+    const disposition = response.headers.get('Content-Disposition') || ''
+    const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
+    const filename = encoded
+      ? decodeURIComponent(encoded[1])
+      : `${doc.filename.replace(/\.[^.]+$/, '')}_AI批注${doc.filename.match(/\.[^.]+$/)?.[0] ?? ''}`
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+    notice.value = `已开始下载：${filename}`
+  } catch (error) {
+    notice.value = error instanceof Error ? error.message : '下载带批注版本失败'
+  }
+}
+
+/** 回答里点 [3] 这样的引用角标：打开对应文档并聚焦该引用 */
+function onAnswerClick(event: MouseEvent, turn: Turn) {
+  const el = (event.target as HTMLElement | null)?.closest('.cite-ref') as HTMLElement | null
+  if (!el) return
+  const index = Number(el.dataset.cite)
+  const result = turn.result
+  if (!result || !Number.isFinite(index)) return
+  const pos = result.sources.findIndex((s) => s.index === index)
+  if (pos < 0) return
+  const citation = result.sources[pos]
+  const text = result.retrieved_contexts[pos] || ''
+  const highlights = result.sources
+    .map((s, i) => ({ s, text: result.retrieved_contexts[i] || '' }))
+    .filter((x) => x.s.document_id === citation.document_id && x.text)
+    .map((x) => highlightOf(x.s, x.text))
+  openCitation(citation, text, highlights.length ? highlights : undefined, turn)
+}
+
+/** 把回答中的 [n] / 【n】 引用角标替换成可点击按钮（跳过 HTML 标签与代码块内部） */
+function answerHtml(text: string) {
+  return markdown(text)
+    .split(/(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>)/i)
+    .map((part) => {
+      if (/^<(pre|code)\b/i.test(part)) return part
+      return part.replace(
+        /(<[^>]*>)|[[【]\s*(\d{1,2})\s*[\]】]/g,
+        (match, tag: string | undefined, num: string | undefined) =>
+          tag ??
+          `<button type="button" class="cite-ref" data-cite="${num}" title="查看引用 ${num}">${num}</button>`,
+      )
+    })
+    .join('')
+}
+/** 从资料列表直接打开文档（不带引用高亮，避免残留上一次的高亮） */
+function openDoc(doc: Document) {
+  viewerHighlights.value = []
+  viewerFocus.value = null
+  viewerDoc.value = doc
+}
+watch(viewerDoc, (doc) => {
+  if (!doc) {
+    viewerHighlights.value = []
+    viewerFocus.value = null
+  }
+})
 const activeTurn = ref(0)
+/** 对话导航圆点：每页 5 个，可上下翻组，避免长对话把圆点排成一长串 */
+const DOT_PAGE_SIZE = 5
+const dotPage = ref(0)
+const dotPageCount = computed(() =>
+  Math.max(1, Math.ceil((currentChat.value?.turns.length ?? 0) / DOT_PAGE_SIZE)),
+)
+const dotTurns = computed(() => {
+  const turns = currentChat.value?.turns ?? []
+  const start = dotPage.value * DOT_PAGE_SIZE
+  return turns.slice(start, start + DOT_PAGE_SIZE).map((turn, i) => ({ turn, index: start + i }))
+})
+function shiftDotPage(delta: number) {
+  const next = dotPage.value + delta
+  if (next < 0 || next >= dotPageCount.value) return
+  dotPage.value = next
+}
+watch(activeTurn, (value) => {
+  const page = Math.floor(value / DOT_PAGE_SIZE)
+  if (page !== dotPage.value && page < dotPageCount.value) dotPage.value = page
+})
 function turnPreview(question: string) {
   const text = question.replace(/\s+/g, ' ').trim()
   return text.length > 20 ? text.slice(0, 20) + '…' : text
@@ -461,6 +686,7 @@ function resetSession() {
   activeId.value = null
   chats.value = {}
   selectedIds.value = []
+  scopeOpen.value = false
   courses.value = []
   source.value = null
   query.value = ''
@@ -613,6 +839,7 @@ watch(activeId, (id) => {
   historyLoading.value = false
   activityOpen.value = false
   activeTurn.value = 0
+  dotPage.value = 0
   clearTimeout(pollTimer)
   docRequest++
   documents.value = []
@@ -632,6 +859,38 @@ function chooseProject(id: number) {
   activeId.value = id
   view.value = 'research'
   sidebarOpen.value = false
+}
+/** 删除项目：点垃圾桶先弹确认窗口，确认后才真的删 */
+const projectToDelete = ref<Project | null>(null)
+function askDeleteProject(project: Project) {
+  projectToDelete.value = project
+  openModal('delete-project')
+}
+function removeProject() {
+  const project = projectToDelete.value
+  if (!project || modalBusy.value) return
+  modalBusy.value = true
+  modalError.value = ''
+  void (async () => {
+    try {
+      await request(`/projects/${project.id}`, { method: 'DELETE' })
+      const remaining = projects.value.filter((item) => item.id !== project.id)
+      projects.value = remaining
+      delete chats.value[project.id]
+      if (activeId.value === project.id) {
+        activeId.value = null
+        if (remaining.length) chooseProject(remaining[0].id)
+      }
+      projectToDelete.value = null
+      modalBusy.value = false
+      closeModal()
+    } catch (e) {
+      modalError.value = e instanceof Error ? e.message : '删除失败，请重试。'
+      if (e instanceof ApiError && e.status === 401) report(e)
+    } finally {
+      modalBusy.value = false
+    }
+  })()
 }
 async function upload(files: File[]) {
   if (!activeId.value || uploading.value) return
@@ -744,16 +1003,22 @@ async function ask() {
   query.value = ''
   asking.value = true
   error.value = ''
+  const seq = ++askSeq
+  askingTurn = { chat, index: turnIndex }
+  askInterrupted = false
+  askController = new AbortController()
+  const signal = askController.signal
   void scrollChat()
   try {
     if (durableAsk.value) {
-      const result = await post<Job>(`/projects/${id}/ask/jobs`, body)
+      const result = await post<Job>(`/projects/${id}/ask/jobs`, body, signal)
       if (version !== sessionVersion) return
       chat.turns[turnIndex]!.jobId = result.job_id
       await pollAnswer(id, chat, turnIndex, result.job_id, version)
     } else {
-      const result = await post<Answer>(`/projects/${id}/ask`, body)
+      const result = await post<Answer>(`/projects/${id}/ask`, body, signal)
       if (version !== sessionVersion) return
+      if (seq !== askSeq || askInterrupted) return
       chat.turns[turnIndex]!.result = result
       chat.conversationId = result.conversation_id
     }
@@ -761,18 +1026,43 @@ async function ask() {
       item => item.tool === 'supplement_timetable_image',
     )) agentImage.value = null
   } catch (e) {
-    if (version !== sessionVersion) return
+    if (version !== sessionVersion || seq !== askSeq) return
+    if (askInterrupted || (e instanceof DOMException && e.name === 'AbortError')) {
+      chat.turns[turnIndex]!.stopped = true
+      return
+    }
     chat.turns[turnIndex]!.error = e instanceof Error ? e.message : '回答失败'
     if (e instanceof ApiError && e.status === 401) report(e)
   } finally {
-    if (version === sessionVersion) asking.value = false
+    if (seq === askSeq) {
+      askController = null
+      askingTurn = null
+    }
+    if (seq === askSeq && version === sessionVersion) asking.value = false
     void scrollChat()
   }
 }
+/** 停止当前这轮问答：中断请求、结束轮询，这一轮标记为“已停止” */
+function stopAsking() {
+  if (!asking.value) return
+  askInterrupted = true
+  if (askingTurn) askingTurn.chat.turns[askingTurn.index]!.stopped = true
+  askController?.abort()
+  askController = null
+  wakeAsk?.()
+  asking.value = false
+}
 async function pollAnswer(id: number, chat: Chat, index: number, jobId: string, version: number) {
   for (let attempt = 0; attempt < 180; attempt++) {
+    if (askInterrupted) {
+      chat.turns[index]!.stopped = true
+      return
+    }
     const job = await request<Job>(`/projects/${id}/jobs/${jobId}`)
-    if (version !== sessionVersion) return
+    if (version !== sessionVersion || askInterrupted) {
+      if (askInterrupted) chat.turns[index]!.stopped = true
+      return
+    }
     if (job.status === 'completed' && job.result) {
       chat.turns[index]!.result = job.result
       chat.conversationId = job.result.conversation_id
@@ -857,6 +1147,16 @@ async function loadLatestConversation(id: number) {
   } catch {
     // 后台预载失败时保持欢迎页，不打断进入项目
   }
+}
+/** 历史会话被删掉：删的正是当前打开的那段时，回到空白新对话 */
+function conversationDeleted(conversationId: number) {
+  const id = activeId.value
+  if (!id) return
+  const chat = chats.value[id]
+  if (!chat || chat.conversationId !== conversationId) return
+  chats.value[id] = { turns: [] }
+  source.value = null
+  query.value = ''
 }
 function newChat() {
   if (activeId.value && !asking.value && !historyLoading.value) {
@@ -1014,16 +1314,29 @@ onUnmounted(() => {
       /></label>
       <div class="project-list">
         <p v-if="booting || projectLoading" class="sidebar-hint">正在加载项目…</p>
-        <button
+        <div
           v-for="project in visibleProjects"
           :key="project.id"
-          class="project-item"
+          class="project-item-wrap"
           :class="{ selected: activeId === project.id }"
-          @click="chooseProject(project.id)"
         >
-          <FolderOpen :size="16" /><span>{{ project.name }}</span
-          ><ChevronRight :size="13" />
-        </button>
+          <button
+            class="project-item"
+            :class="{ selected: activeId === project.id }"
+            @click="chooseProject(project.id)"
+          >
+            <FolderOpen :size="16" /><span>{{ project.name }}</span
+            ><ChevronRight :size="13" />
+          </button>
+          <button
+            class="project-delete"
+            :aria-label="`删除项目：${project.name}`"
+            title="删除项目"
+            @click.stop="askDeleteProject(project)"
+          >
+            <Trash2 :size="14" />
+          </button>
+        </div>
         <p v-if="!booting && !projectLoading && !visibleProjects.length" class="sidebar-hint">
           {{ filter ? '没有匹配的项目' : '每一个研究，从一个项目开始。' }}
         </p>
@@ -1133,15 +1446,40 @@ onUnmounted(() => {
             class="turn-dots"
             aria-label="对话导航"
           >
-            <span
-              v-for="(turn, index) in currentChat.turns"
-              :key="index"
-              class="turn-dot-wrap"
-              @click="scrollToTurn(index)"
+            <button
+              v-if="dotPageCount > 1"
+              type="button"
+              class="turn-page-btn"
+              :disabled="dotPage === 0"
+              aria-label="上一组对话"
+              title="上一组"
+              @click="shiftDotPage(-1)"
             >
-              <i class="turn-dot" :class="{ active: index === activeTurn }"></i>
-              <span class="turn-dot-tip" role="tooltip">{{ turnPreview(turn.question) }}</span>
+              <ChevronUp :size="12" />
+            </button>
+            <span
+              v-for="item in dotTurns"
+              :key="item.index"
+              class="turn-dot-wrap"
+              @click="scrollToTurn(item.index)"
+            >
+              <i class="turn-dot" :class="{ active: item.index === activeTurn }"></i>
+              <span class="turn-dot-tip" role="tooltip">{{ turnPreview(item.turn.question) }}</span>
             </span>
+            <button
+              v-if="dotPageCount > 1"
+              type="button"
+              class="turn-page-btn"
+              :disabled="dotPage >= dotPageCount - 1"
+              aria-label="下一组对话"
+              title="下一组"
+              @click="shiftDotPage(1)"
+            >
+              <ChevronDown :size="12" />
+            </button>
+            <span v-if="dotPageCount > 1" class="turn-page-indicator"
+              >{{ dotPage + 1 }}/{{ dotPageCount }}</span
+            >
           </nav>
           <div class="chat-scroll" @scroll.passive="onChatScroll">
             <ProjectActivity
@@ -1151,6 +1489,7 @@ onUnmounted(() => {
               :locked="asking || historyLoading"
               @error="report"
               @conversation="openConversation"
+              @deleted="conversationDeleted"
               @refresh="loadDocuments(activeId)"
             />
             <p v-if="historyLoading" class="feature-notice" role="status">正在恢复历史会话…</p>
@@ -1201,15 +1540,23 @@ onUnmounted(() => {
                       ><Layers3 :size="13" />自动项目 · 全部资料</span
                     >
                     <button
+                      v-if="asking"
+                      type="button"
+                      class="send-button stop"
+                      aria-label="停止回答"
+                      title="停止回答"
+                      @click="stopAsking"
+                    >
+                      <Square :size="13" fill="currentColor" />
+                    </button>
+                    <button
+                      v-else
                       type="submit"
                       class="send-button"
-                      :disabled="!query.trim() || asking"
+                      :disabled="!query.trim()"
                       aria-label="发送问题"
                     >
-                      <LoaderCircle v-if="asking" :size="16" class="spin" /><ArrowUp
-                        v-else
-                        :size="16"
-                      />
+                      <ArrowUp :size="16" />
                     </button>
                   </div>
                 </form>
@@ -1295,7 +1642,8 @@ onUnmounted(() => {
                     <div
                       v-if="turn.result"
                       class="markdown"
-                      v-html="markdown(turn.result.answer)"
+                      v-html="answerHtml(turn.result.answer)"
+                      @click="onAnswerClick($event, turn)"
                     ></div>
                     <p v-else-if="turn.error" class="turn-error">
                       {{ turn.error }}
@@ -1303,8 +1651,10 @@ onUnmounted(() => {
                         重新编辑
                       </button>
                     </p>
+                    <p v-else-if="turn.stopped" class="turn-stopped">已停止这一轮回答</p>
                     <p v-else class="thinking">
                       <LoaderCircle :size="16" class="spin" />正在检索资料、整理回答…
+                      <button type="button" class="text-button" @click="stopAsking">停止</button>
                     </p>
                     <p v-if="turn.jobId" class="job-id">
                       任务 {{ turn.jobId }} · 刷新后可从“历史与任务”找回
@@ -1313,10 +1663,12 @@ onUnmounted(() => {
                       <button
                         v-for="group in citationGroups(turn)"
                         :key="group.items[0].citation.index"
-                        @click="openCitationGroup(group)"
+                        class="source-chip"
+                        :title="`在预览中查看「${group.filename}」的引用位置（写入批注在预览窗口里）`"
+                        @click="openCitationGroup(turn, group)"
                       >
                         <span>{{ group.items[0].citation.index }}</span
-                        ><FileText :size="13" />{{ group.filename
+                        ><FileText :size="12" />{{ group.filename
                         }}<em v-if="group.items.length > 1">×{{ group.items.length }}</em>
                       </button>
                     </div>
@@ -1421,11 +1773,52 @@ onUnmounted(() => {
                 "
               ></textarea>
               <div class="composer-bottom">
-                <span class="scope-label"
-                  ><Layers3 :size="14" />{{
-                    selectedIds.length ? `已选 ${selectedIds.length} 份资料` : '全部项目资料'
-                  }}<span v-if="excerptDocument" class="excerpt-label">附带原文</span></span
-                >
+                <div class="scope-anchor">
+                  <div v-if="scopeOpen" class="scope-backdrop" @click="scopeOpen = false"></div>
+                  <button
+                    type="button"
+                    class="scope-button"
+                    :aria-expanded="scopeOpen"
+                    title="选择提问时检索哪些资料"
+                    @click="scopeOpen = !scopeOpen"
+                  >
+                    <Layers3 :size="14" />{{
+                      selectedIds.length ? `已选 ${selectedIds.length} 份资料` : '全部项目资料'
+                    }}<span v-if="excerptDocument" class="excerpt-label">附带原文</span>
+                  </button>
+                  <div v-if="scopeOpen" class="scope-pop">
+                    <div class="scope-pop-head">
+                      <strong>选择检索资料</strong>
+                      <button
+                        v-if="selectedIds.length"
+                        type="button"
+                        class="scope-clear"
+                        @click="selectedIds = []"
+                      >
+                        使用全部资料
+                      </button>
+                    </div>
+                    <p v-if="loadingDocs" class="scope-empty">正在读取资料…</p>
+                    <p v-else-if="!documents.length" class="scope-empty">
+                      项目还没有已导入的资料，先在右侧栏上传
+                    </p>
+                    <div v-else class="scope-list">
+                      <label v-for="doc in documents" :key="doc.id" class="scope-item">
+                        <input
+                          v-model="selectedIds"
+                          type="checkbox"
+                          :value="doc.id"
+                          :disabled="doc.status !== 'completed'"
+                        />
+                        <span class="scope-name" :title="doc.filename">{{ doc.filename }}</span>
+                        <small :class="doc.status">{{ statusText(doc.status) }}</small>
+                      </label>
+                    </div>
+                    <p v-if="documents.length" class="scope-pop-hint">
+                      {{ selectedIds.length ? '只检索勾选的资料' : '未勾选时检索全部资料' }}
+                    </p>
+                  </div>
+                </div>
                 <div>
                   <button
                     type="button"
@@ -1437,6 +1830,16 @@ onUnmounted(() => {
                   >
                     <Settings2 :size="17" /></button
                   ><button
+                    v-if="asking"
+                    type="button"
+                    class="send-button stop"
+                    aria-label="停止回答"
+                    title="停止回答"
+                    @click="stopAsking"
+                  >
+                    <Square :size="14" fill="currentColor" /></button
+                  ><button
+                    v-else
                     type="submit"
                     class="send-button"
                     :disabled="!canAsk"
@@ -1451,7 +1854,15 @@ onUnmounted(() => {
               </div>
             </form>
             <p class="composer-hint">
-              回答由 AI 生成，请结合引用原文核实。<span>Enter 发送 · Shift + Enter 换行</span>
+              <template v-if="asking">
+                <button type="button" class="text-button" @click="stopAsking">
+                  停止回答
+                </button>
+                <span>可随时中断当前这一轮回答</span>
+              </template>
+              <template v-else>
+                回答由 AI 生成，请结合引用原文核实。<span>Enter 发送 · Shift + Enter 换行</span>
+              </template>
             </p>
           </div>
         </main>
@@ -1533,8 +1944,14 @@ onUnmounted(() => {
             <DocumentViewer
               :project-id="activeId!"
               :document="viewerDoc"
+              :highlights="viewerHighlights"
+              :focus="viewerFocus"
+              :annotating="annotating"
+              :annotated-indices="viewerAnnotatedIndices"
               @close="viewerDoc = null"
               @error="report"
+              @annotate="annotateInViewer"
+              @download-annotated="downloadAnnotatedCopy"
             />
           </template>
  
@@ -1621,7 +2038,7 @@ onUnmounted(() => {
                     @error="report"
                     @notice="notice = $event"
                     @changed="loadDocuments(activeId)"
-                    @view-doc="viewerDoc = doc"
+                    @view-doc="openDoc(doc)"
                   />
                 </div>
                 <button
@@ -1825,6 +2242,23 @@ onUnmounted(() => {
         <ol class="help-steps"><li><strong>创建研究项目</strong><p>注册或登录后，为一个研究主题建立项目。</p></li><li><strong>上传你的资料</strong><p>支持 PDF、TXT、DOCX 和 PPTX。等待状态变为已就绪后即可提问。</p></li><li><strong>提问、追问与核实</strong><p>在同一对话内继续追问，点击引用查看证据。右侧勾选文件可缩小范围，问答设置中可以附带原文。</p></li></ol>
         <p>刷新后可从历史与任务打开已保存的会话并继续提问，也可导出 Markdown。后台问答任务可在任务列表中查看结果或重试。</p>
         <button class="primary-button full-width" @click="closeModal">开始探索 <ArrowRight :size="16" /></button>
+      </template>
+      <template v-else-if="modal === 'delete-project'"
+        ><div class="modal-mark danger-mark"><Trash2 :size="20" /></div>
+        <h2>删除这个项目？</h2>
+        <p>
+          项目「{{ projectToDelete?.name }}」中的<strong>全部文档、对话记录、检索结果与批注</strong>都会被永久删除，删除后无法恢复。
+        </p>
+        <p v-if="modalError" role="alert" class="danger-text">{{ modalError }}</p>
+        <div class="button-row">
+          <button
+            class="subtle-button row-btn-danger"
+            :disabled="modalBusy"
+            @click="removeProject"
+          >
+            {{ modalBusy ? '正在删除…' : '确认删除项目' }}</button
+          ><button class="text-button" :disabled="modalBusy" @click="closeModal">取消</button>
+        </div>
       </template>
     </div>
   </dialog>

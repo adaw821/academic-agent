@@ -37,6 +37,10 @@ pwdlib[argon2]==0.3.0
 # School HTML collection
 beautifulsoup4==4.15.0
 
+# Optional PPT→PDF preview via local Microsoft PowerPoint (Windows only).
+# Used only when LibreOffice is not installed; absence is handled gracefully.
+pywin32==311; sys_platform == "win32"
+
 # Desktop iSpace login and MIS timetable capture (UI and agent tools).
 # Install browser binaries separately: python -m playwright install chromium
 # Launching a school window additionally requires ISPACE_LOCAL_LOGIN=1.

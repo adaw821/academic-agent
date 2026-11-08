@@ -17,6 +17,20 @@ export interface Source {
   document_id: number
   parent_id: number
   filename: string
+  section_id?: string | null
+  heading_path?: string | null
+  page_numbers?: number[] | null
+  child_page_numbers?: number[] | null
+  /** 命中的子块原文：比父块更精确，高亮定位优先用它 */
+  child_content?: string | null
+  /** 回答实际依据的引文 */
+  quote_text?: string | null
+}
+/** 传给文档预览器的高亮目标：引用编号 + 被引原文 + 大致页码 */
+export interface CitationHighlight {
+  index: number
+  text: string
+  pages?: number[]
 }
 export interface Answer {
   answer: string
@@ -99,7 +113,9 @@ export async function request<T>(url: string, init: RequestInit = {}): Promise<T
   let response: Response
   try {
     response = await fetch(`/api${url}`, { ...init, credentials: 'same-origin' })
-  } catch {
+  } catch (e) {
+    // 主动中止（用户点“停止”）不是网络故障，原样抛出让调用方识别
+    if (e instanceof DOMException && e.name === 'AbortError') throw e
     throw new ApiError(0, '无法连接服务，请检查网络与后端运行状态。')
   }
   const payload = await response.json().catch(() => null)
@@ -120,9 +136,65 @@ export async function request<T>(url: string, init: RequestInit = {}): Promise<T
   return payload as T
 }
 
-export const post = <T>(url: string, body: unknown) =>
+export const post = <T>(url: string, body: unknown, signal?: AbortSignal) =>
   request<T>(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
   })
+
+/** 文件内 AI 批注（docx 批注 / pdf 高亮 / pptx 备注） */
+export interface DocumentAnnotation {
+  id: number
+  document_id: number
+  cite_index: number
+  summary: string
+  kind: 'docx_comment' | 'pdf_note' | 'pdf_highlight' | 'pptx_note'
+  pages: number[]
+  preview?: string
+  created_at?: string | null
+}
+export interface AnnotationResult extends DocumentAnnotation {
+  total: number
+  created: boolean
+  filename: string
+  download_url: string
+}
+export interface AnnotationList {
+  items: DocumentAnnotation[]
+  total: number
+  filename: string
+  download_url: string
+  has_copy: boolean
+}
+
+export function addAnnotation(
+  projectId: number,
+  documentId: number,
+  body: {
+    cite_index: number
+    anchor_text: string
+    question?: string
+    answer?: string
+    pages?: number[]
+    message_id?: number
+    turn_key?: string
+  },
+) {
+  return post<AnnotationResult>(`/projects/${projectId}/documents/${documentId}/annotations`, body)
+}
+
+export function listAnnotations(projectId: number, documentId: number) {
+  return request<AnnotationList>(`/projects/${projectId}/documents/${documentId}/annotations`)
+}
+
+export function deleteAnnotation(projectId: number, documentId: number, annotationId: number) {
+  return request<{ removed: number; deleted: boolean }>(
+    `/projects/${projectId}/documents/${documentId}/annotations/${annotationId}`,
+    { method: 'DELETE' },
+  )
+}
+
+export const annotatedFileUrl = (projectId: number, documentId: number) =>
+  `/api/projects/${projectId}/documents/${documentId}/annotated`
