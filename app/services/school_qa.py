@@ -20,6 +20,7 @@ from app.services.school_course_qa import CourseQuery, query_courses, TOOL_NAME 
 
 from app.services.school_actions import ACTION_SCHEMAS, execute_action, answer_action
 from app.services import timetable_actions
+from app.services.performance import logger as performance_logger
 
 TOOL_NAME = 'query_assignments'
 SNAPSHOT_WARNING = '数据来自最近一次学校同步的本地副本，可能不是实时或完整清单；未查询到记录不等于学校没有作业。'
@@ -168,6 +169,11 @@ def plan_assignment_query(query, history, summary, *, allow_school_sync=False, a
     if response.invalid_tool_calls or len(calls) != 1:
         raise HTTPException(502, '模型未返回有效的单个学校工具调用')
     call = calls[0]
+    # 诊断用：规划器每次把问题路由到哪个工具；use_document_qa 表示交回检索。
+    performance_logger.info(
+        "event=assignment_planner_pick tool=%s is_document=%s",
+        call['name'], call['name'] == DOCUMENT_TOOL_NAME,
+    )
     query_schemas = {TOOL_NAME: AssignmentQuery, RESOURCE_TOOL_NAME: AssignmentResourceQuery,
                      REMINDER_TOOL_NAME: ReminderQuery, TIMETABLE_TOOL_NAME: TimetableQuery,
                      COURSES_TOOL_NAME: CourseQuery, CLARIFY_TOOL_NAME: SchoolClarification,

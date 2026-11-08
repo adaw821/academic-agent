@@ -26,6 +26,8 @@ class QAState(TypedDict, total=False):
     result: dict
     assignment_tool: dict | None
     assignment_data: dict
+    overview_plan: dict | None
+    route: str
 
 
 class DocumentState(TypedDict, total=False):
@@ -48,16 +50,18 @@ def build_qa_graph(nodes):
     sequence = [START, "validate", "history"]
     for source, target in zip(sequence, sequence[1:]):
         graph.add_edge(source, target)
-    if "tool_route" in nodes:
-        graph.add_edge("history", "tool_route")
-        graph.add_conditional_edges("tool_route", lambda state: (
-            "assignment_query" if state.get("assignment_tool") else "rewrite"
-        ), ["assignment_query", "rewrite"])
+    graph.add_edge("history", "route")
+    route_targets = {"overview": "overview_retrieve", "continue": "rewrite"}
+    if "assignment_query" in nodes:
+        route_targets["tool"] = "assignment_query"
+    graph.add_conditional_edges("route", lambda state: state["route"], route_targets)
+    graph.add_edge("rewrite", "translate")
+    graph.add_conditional_edges("overview_retrieve", lambda state: (
+        "save" if state["overview_plan"].get("clarification") else "answer"
+    ), ["save", "answer"])
+    if "assignment_query" in nodes:
         graph.add_edge("assignment_query", "assignment_answer")
         graph.add_edge("assignment_answer", "save")
-    else:
-        graph.add_edge("history", "rewrite")
-    graph.add_edge("rewrite", "translate")
     graph.add_conditional_edges("translate", lambda state: (
         "selection_retrieve" if state.get("selection") is not None else "retrieve_original"
     ), ["selection_retrieve", "retrieve_original"])

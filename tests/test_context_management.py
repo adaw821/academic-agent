@@ -98,7 +98,8 @@ class ContextTests(unittest.TestCase):
              patch.object(rag_flow, "search_vector", return_value=[]), \
              patch.object(rag_flow, "search_bm25", return_value=[]), \
              patch.object(rag_flow, "rerank_results", return_value=self.chunk):
-            result = rag_flow.user_asking(1, request, self.db, self.db.get(User, 1))
+            with patch.object(rag_flow, "translate_query", return_value=None):
+                result = rag_flow.execute_qa(1, request, self.db, self.db.get(User, 1))
         rewrite.invoke.assert_not_called()
         messages = self.db.scalars(select(Message).where(Message.conversation_id == result["conversation_id"]).order_by(Message.id)).all()
         self.assertEqual([m.role for m in messages], ["user", "assistant"])
@@ -287,7 +288,8 @@ class ContextTests(unittest.TestCase):
                      patch.object(rag_flow, "search_bm25", return_value=[]), \
                      patch.object(rag_flow, "rerank_results", return_value=self.chunk):
                     with self.assertRaises(HTTPException) as failure:
-                        rag_flow.user_asking(1, request, self.db, self.db.get(User, 1))
+                        with patch.object(rag_flow, "translate_query", return_value=None):
+                            rag_flow.execute_qa(1, request, self.db, self.db.get(User, 1))
                 self.assertEqual(failure.exception.status_code, 502)
                 self.assertEqual(list(self.db.scalars(select(Message))), [])
 
@@ -303,6 +305,20 @@ class ContextTests(unittest.TestCase):
         with patch.object(context, "get_tokenizer", return_value=tokenizer):
             self.assertEqual(context.count_message_tokens(messages), 3)
         tokenizer.apply_chat_template.assert_called_once_with(messages, tokenize=True, add_generation_prompt=True)
+
+    def test_overview_prompt_and_sources_include_body_after_cover(self):
+        answer_model = model("overview [2]")
+        chunks = [dict(self.chunk[0], parent_content="# Cover"),
+                  dict(self.chunk[0], parent_id=999, parent_content="# Exercises\nFinal exercise")]
+        with patch.object(answers, "llm", answer_model), \
+             patch.object(answers, "count_message_tokens", return_value=100), \
+             patch.object(context, "count_message_tokens", return_value=100):
+            result = answers.generate_answer("总结这份 PPT", chunks, [], None, self.db, 1, overview=True)
+        messages = answer_model.invoke.call_args.args[0]
+        self.assertIn("整份文档概述", messages[0].content)
+        self.assertIn("Final exercise", messages[1].content)
+        self.assertEqual(result["sources"][1]["parent_id"], 999)
+        self.assertEqual(result["retrieved_contexts"], [c["parent_content"] for c in chunks])
 
 
 if __name__ == "__main__":

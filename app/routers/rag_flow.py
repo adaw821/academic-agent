@@ -20,6 +20,7 @@ from app.models.users import User
 from app.schemas.search import SearchRequest
 from app.services.search_services import search_vector, search_bm25, rrf_fuse, rerank_results, history_messages_control, rewrite_query, search_document_first
 from app.services.answer_services import generate_answer, get_history_messages
+from app.services.document_overview import plan_document_overview, read_document_overview
 from app.services.user_services import get_currentUser
 
 from langchain_openai import ChatOpenAI
@@ -31,6 +32,7 @@ translator = ChatOpenAI(
     api_key=os.environ["ZHIPU_API_KEY"],
     timeout=15,
     max_retries=0,
+    temperature=0,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -420,6 +422,36 @@ def execute_qa(project_id, request, db, user, *, checkpoints=None, local_browser
     def translate(state):
         return {"translated_query": translate_query(state["search_query"])}
 
+    def route(state):
+        # 统一入口:在原始问题上判一次,定一条路(概述 / 工具 / 继续检索)。
+        plan = None if state["selection"] is not None else plan_document_overview(
+            request.query, project_id, db, state["doc_ids"],
+            allow_implicit=not (state["history"] or state["summary"]),
+        )
+        if plan:
+            performance_logger.info("event=qa_route route=overview")
+            return {"route": "overview", "overview_plan": plan}
+        # 工具:维持现有门控(required/开关留到后续 Step 再动)。
+        if request.use_school_tools and request.doc_ids is None and request.document_id is None:
+            from app.services.school_qa import plan_assignment_query
+            tool = plan_assignment_query(
+                request.query, state["history"], state["summary"],
+                allow_school_sync=request.allow_school_sync,
+                allow_school_actions=request.allow_school_actions,
+                has_timetable_image=bool(request.timetable_image_id),
+            )
+            if tool:
+                performance_logger.info("event=qa_route route=tool")
+                return {"route": "tool", "assignment_tool": tool}
+        performance_logger.info("event=qa_route route=continue")
+        return {"route": "continue"}
+
+    def overview_retrieve(state):
+        plan = state["overview_plan"]
+        if plan.get("clarification"):
+            return {"result": {"answer": plan["clarification"], "sources": [], "retrieved_contexts": []}}
+        return {"final_chunks": read_document_overview(project_id, plan["document_ids"], db)}
+
     def retrieve(state, query_kind):
         query = state["search_query"] if query_kind == "original" else state["translated_query"]
         vector, bm25 = retrieve_documents(query, project_id, db, request.candidate_k_percentage, state["doc_ids"])
@@ -446,9 +478,11 @@ def execute_qa(project_id, request, db, user, *, checkpoints=None, local_browser
         )}
 
     def answer(state):
+        options = {"overview": True} if state.get("overview_plan") else {}
         return {"result": generate_answer(
             request.query, state["final_chunks"], state["history"], request.conversation_id, db, project_id,
             summary=state["summary"], summary_boundary=state["summary_boundary"], selection=state["selection"],
+            **options,
         )}
 
     def save(state):
@@ -470,14 +504,10 @@ def execute_qa(project_id, request, db, user, *, checkpoints=None, local_browser
         "validate": validate, "history": history, "rewrite": rewrite, "translate": translate,
         "retrieve_original": retrieve_original, "retrieve_translated": retrieve_translated,
         "rerank": rerank, "selection_retrieve": selection_retrieve, "answer": answer, "save": save,
+        "route": route, "overview_retrieve": overview_retrieve,
     }
     if request.use_school_tools and request.doc_ids is None and request.document_id is None:
         from app.services.school_qa import plan_assignment_query, query_assignments, answer_assignments
-
-        def tool_route(state):
-            return {"assignment_tool": plan_assignment_query(request.query, state["history"], state["summary"],
-                                                            allow_school_sync=request.allow_school_sync, allow_school_actions=request.allow_school_actions,
-                                                            has_timetable_image=bool(request.timetable_image_id))}
 
         def assignment_query(state):
             return {"assignment_data": query_assignments(db, user.id, state["assignment_tool"], project_id=project_id,
@@ -486,7 +516,7 @@ def execute_qa(project_id, request, db, user, *, checkpoints=None, local_browser
         def assignment_answer(state):
             return {"result": answer_assignments(request.query, state["assignment_tool"], state["assignment_data"])}
 
-        nodes.update(tool_route=tool_route, assignment_query=assignment_query, assignment_answer=assignment_answer)
+        nodes.update(assignment_query=assignment_query, assignment_answer=assignment_answer)
     if checkpoints is not None:
         nodes = checkpoints.wrap(nodes, uncached={"validate", "save"})
     graph = build_qa_graph(nodes)

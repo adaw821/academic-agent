@@ -388,12 +388,18 @@ def rerank_results(
         "event=rerank_output pair_count=%s scored_child_count=%s parent_count=%s",
         pair_count, len(scored), len(results),
     )
+    # 诊断：无论是否过 0.3 阈值，打印候选里最高的几个分数，判断阈值是否过严。
+    top_scored = sorted(scored.values(), key=lambda item: item["total_score"], reverse=True)[:5]
+    performance_logger.info(
+        "event=rerank_top_scores min_score=0.3 scores=%s",
+        [round(item["total_score"], 3) for item in top_scored],
+    )
     for index, item in enumerate(results):
         performance_logger.info(
             "event=rerank_output_item index=%s child_id=%s parent_id=%s "
-            "query_kind=%s child_chars=%s parent_chars=%s",
+            "query_kind=%s score=%.3f child_chars=%s parent_chars=%s",
             index, item["child_id"], item["parent_id"], item["score_mode"],
-            len(item["child_content"]), len(item.get("parent_content", "")),
+            item["total_score"], len(item["child_content"]), len(item.get("parent_content", "")),
         )
     return results
 

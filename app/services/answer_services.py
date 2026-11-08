@@ -72,6 +72,7 @@ llm = ChatOpenAI(
     model = "glm-5.3",
     base_url="https://open.bigmodel.cn/api/paas/v4/",
     api_key=os.environ["ZHIPU_API_KEY"],
+    temperature=0,
 )
 
 
@@ -86,6 +87,7 @@ def generate_answer(
         summary: str = "",
         summary_boundary: int | None = None,
         selection: dict | None = None,
+        overview: bool = False,
 ):
     if not final_chunks and selection is None:
         return {
@@ -93,6 +95,10 @@ def generate_answer(
             "retrieved_contexts": [],
             "sources": [],
         }
+
+    if overview:
+        from app.services.overview_context import prepare_overview_context
+        final_chunks = prepare_overview_context(final_chunks, llm)
 
     system_prompt =(
                 "你是一个文档问答助手，根据用户问题和提供的参考资料回答。\n"
@@ -118,6 +124,13 @@ def generate_answer(
                 "7. 来源：在有资料依据的关键结论后标注对应编号，例如[1]或[1][2]。"
                 "只标注实际支持该结论的资料，不编造编号。"
                 "若资料互相冲突，说明冲突及各自来源，不擅自确定哪一项正确。")
+
+    if overview:
+        system_prompt += (
+            "\n本轮为整份文档概述，资料按文档和正文顺序提供，长正文可能已逐段压缩。"
+            "请覆盖正文各部分的主要主题、知识点及练习要求，不要仅复述封面或目录。"
+            "多份文档分别概述，保留各自的来源编号。仅概述实际提供的内容。"
+        )
 
     if selection is not None:
         system_prompt += (
@@ -305,6 +318,7 @@ def generate_answer(
                 # 锚点子块：前端据它定位高亮。父块常跨多个小节（如 Exercise 1~3），
                 # 直接用父块匹配会永远亮到第一段，位置对不上。
                 "child_content": anchors[index - 1],
+                **({"context_kind": item["context_kind"]} if item.get("context_kind") else {}),
             }
             for index, item in enumerate(final_chunks, start=1)
         ],
