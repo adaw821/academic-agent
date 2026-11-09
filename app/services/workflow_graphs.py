@@ -51,7 +51,8 @@ def build_qa_graph(nodes):
     for source, target in zip(sequence, sequence[1:]):
         graph.add_edge(source, target)
     graph.add_edge("history", "route")
-    route_targets = {"overview": "overview_retrieve", "continue": "rewrite"}
+    route_targets = {"overview": "overview_retrieve", "continue": "rewrite",
+                     "whole_doc": "answer", "clarify": "save"}
     if "assignment_query" in nodes:
         route_targets["tool"] = "assignment_query"
     graph.add_conditional_edges("route", lambda state: state["route"], route_targets)

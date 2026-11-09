@@ -19,8 +19,12 @@ from app.schemas.project_create import ProjectCreate
 from app.models.users import User
 from app.schemas.search import SearchRequest
 from app.services.search_services import search_vector, search_bm25, rrf_fuse, rerank_results, history_messages_control, rewrite_query, search_document_first
-from app.services.answer_services import generate_answer, get_history_messages
-from app.services.document_overview import plan_document_overview, read_document_overview
+from app.services.answer_services import (
+    generate_answer, get_history_messages,
+    CONTEXT_LIMIT, RESERVED_OUTPUT_TOKENS, SAFETY_MARGIN,
+)
+from app.services.context_management import count_message_tokens, is_over_budget
+from app.services.document_overview import plan_document_overview, read_document_overview, resolve_named_docs
 from app.services.user_services import get_currentUser
 
 from langchain_openai import ChatOpenAI
@@ -423,16 +427,47 @@ def execute_qa(project_id, request, db, user, *, checkpoints=None, local_browser
         return {"translated_query": translate_query(state["search_query"])}
 
     def route(state):
-        # 统一入口:在原始问题上判一次,定一条路(概述 / 工具 / 继续检索)。
+        # 定作用域:勾选优先;没勾选就拿原始问题点名解析(确定性,只认类型+编号/文件名)。
+        scope_ids = state["doc_ids"]
+        named = False
+        if scope_ids is None and state["selection"] is None:
+            hit = resolve_named_docs(request.query, project_id, db)
+            if hit:
+                scope_ids, named = hit, True
+
+        # 点名命中多份 → 直接反问,不赌。
+        if named and len(scope_ids) > 1:
+            performance_logger.info("event=qa_route route=clarify reason=ambiguous_name")
+            return {"route": "clarify", "result": {
+                "answer": "你提到的资料匹配到多份,请在资料栏勾选要用的那一份再问。",
+                "sources": [], "retrieved_contexts": []}}
+
+        # 单份(勾选或点名)+ 整篇装得下 → 读全文(总结/细节都走它),不走检索/rerank。
+        if state["selection"] is None and scope_ids and len(scope_ids) == 1:
+            chunks = read_document_overview(project_id, scope_ids, db)
+            if chunks:
+                message_data = [{"role": "user", "content": "\n".join(c["parent_content"] for c in chunks)}]
+                message_data += [{"role": h["role"], "content": h["content"]} for h in state["history"]]
+                if state["summary"]:
+                    message_data.append({"role": "system", "content": state["summary"]})
+                # +2000 预留系统提示与资料包装的开销,保守判断。
+                if not is_over_budget(count_message_tokens(message_data) + 2000,
+                                      CONTEXT_LIMIT, RESERVED_OUTPUT_TOKENS, SAFETY_MARGIN):
+                    performance_logger.info("event=qa_route route=whole_doc doc_id=%s parents=%s",
+                                            scope_ids[0], len(chunks))
+                    return {"route": "whole_doc", "final_chunks": chunks}
+
+        # 概述(装不下的大文件总结):复用 scope_ids。
         plan = None if state["selection"] is not None else plan_document_overview(
-            request.query, project_id, db, state["doc_ids"],
+            request.query, project_id, db, scope_ids,
             allow_implicit=not (state["history"] or state["summary"]),
         )
         if plan:
             performance_logger.info("event=qa_route route=overview")
             return {"route": "overview", "overview_plan": plan}
-        # 工具:维持现有门控(required/开关留到后续 Step 再动)。
-        if request.use_school_tools and request.doc_ids is None and request.document_id is None:
+
+        # 工具:没勾选也没点名文档时才考虑。
+        if request.use_school_tools and request.doc_ids is None and request.document_id is None and not named:
             from app.services.school_qa import plan_assignment_query
             tool = plan_assignment_query(
                 request.query, state["history"], state["summary"],
@@ -443,8 +478,10 @@ def execute_qa(project_id, request, db, user, *, checkpoints=None, local_browser
             if tool:
                 performance_logger.info("event=qa_route route=tool")
                 return {"route": "tool", "assignment_tool": tool}
+
+        # 兜底:检索。点名了就把范围收紧到那份(retrieve 读 state["doc_ids"])。
         performance_logger.info("event=qa_route route=continue")
-        return {"route": "continue"}
+        return {"route": "continue", "doc_ids": scope_ids}
 
     def overview_retrieve(state):
         plan = state["overview_plan"]
