@@ -515,6 +515,82 @@
   background: #1c1c1c;
   color: #fff;
 }
+/* AI 回答划词后的浮动「追问」按钮（视口定位，箭头朝下指向选区） */
+.quote-pop {
+  position: fixed;
+  z-index: 90;
+  transform: translate(-50%, calc(-100% - 8px));
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: #1c1c1c;
+  color: #fff;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 4px 14px #0000002e;
+}
+.quote-pop::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: #1c1c1c;
+}
+/* composer 上方的一次性引用 chip */
+.quote-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 2px 0 10px;
+  padding: 7px 9px;
+  background: #f6f6f6;
+  border: 1px solid #e3e3e3;
+  border-left: 3px solid #1c1c1c;
+  border-radius: 7px;
+  color: #5a5a5a;
+}
+.quote-chip-doc {
+  flex: 0 0 auto;
+  max-width: 120px;
+  padding: 2px 6px;
+  background: #ececec;
+  border-radius: 4px;
+  font-size: 10px;
+  color: #5a5a5a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.quote-chip-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.quote-chip-x {
+  flex: 0 0 auto;
+  display: inline-flex;
+  padding: 2px;
+  border: 0;
+  background: none;
+  color: #9a9a9a;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.quote-chip-x:hover {
+  color: #1c1c1c;
+  background: #ececec;
+}
 /* 预览器里被引原文的高亮 */
 /* 半透明荧光笔色：PDF 的文字画在下层 canvas，不透明底色会把字盖住 */
 mark.cite-hit {

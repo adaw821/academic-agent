@@ -298,6 +298,9 @@ const scopeOpen = ref(false) // 输入框左下角"资料范围"小弹窗
 const recall = ref(40)
 const excerpt = ref('')
 const excerptDocument = ref<number | null>(null)
+// AI 回答划词（方案 B）：一次性引用，发送后清空；浮动「追问」按钮用视口坐标定位。
+const quoted = ref<string | null>(null)
+const quoteBtn = ref<{ text: string; x: number; y: number } | null>(null)
 const source = ref<{ source: Source; text: string } | null>(null)
 const courses = ref<Course[]>([])
 const timetableFile = ref<File | null>(null)
@@ -311,6 +314,9 @@ const visibleProjects = computed(() =>
   projects.value.filter((p) => p.name.toLowerCase().includes(filter.value.toLowerCase())),
 )
 const readyDocs = computed(() => documents.value.filter((d) => d.status === 'completed'))
+const excerptDocName = computed(
+  () => documents.value.find((d) => d.id === excerptDocument.value)?.filename ?? '原文',
+)
 const processingCount = computed(
   () => documents.value.filter((d) => ['queued', 'processing'].includes(d.status)).length,
 )
@@ -579,6 +585,50 @@ function onAnswerClick(event: MouseEvent, turn: Turn) {
     .map((x) => highlightOf(x.s, x.text))
   openCitation(citation, text, highlights.length ? highlights : undefined, turn)
 }
+
+/** 在 AI 回答里划词：选区落在当前回答内时，弹出浮动「追问」按钮 */
+function onAnswerSelect(event: MouseEvent) {
+  const sel = window.getSelection()
+  const text = sel?.toString().trim()
+  const anchor = event.currentTarget as HTMLElement
+  if (!sel || !text || !anchor.contains(sel.anchorNode) || !anchor.contains(sel.focusNode)) {
+    quoteBtn.value = null
+    return
+  }
+  const rect = sel.getRangeAt(0).getBoundingClientRect()
+  quoteBtn.value = { text: text.slice(0, 10000), x: rect.left + rect.width / 2, y: rect.top }
+}
+/** 点浮动按钮：把选中的 AI 原话存成一次性引用（不收选区会自己被清） */
+function pickQuote() {
+  if (!quoteBtn.value) return
+  quoted.value = quoteBtn.value.text
+  clearExcerpt() // AI 回答划词与原文划词互斥
+  quoteBtn.value = null
+  window.getSelection()?.removeAllRanges()
+}
+/** 预览里划词：走现成的 document_id + selected_text 划线问答契约 */
+function onViewerQuote(text: string) {
+  if (!viewerDoc.value) return
+  excerptDocument.value = viewerDoc.value.id
+  excerpt.value = text
+  quoted.value = null // 与 AI 回答划词互斥
+}
+function clearExcerpt() {
+  excerptDocument.value = null
+  excerpt.value = ''
+}
+/** 开始新选区 / 滚动时，收起已弹出的浮动按钮（定位会失效） */
+function hideQuoteBtn() {
+  quoteBtn.value = null
+}
+onMounted(() => {
+  window.addEventListener('mousedown', hideQuoteBtn)
+  window.addEventListener('scroll', hideQuoteBtn, true)
+})
+onUnmounted(() => {
+  window.removeEventListener('mousedown', hideQuoteBtn)
+  window.removeEventListener('scroll', hideQuoteBtn, true)
+})
 
 /** 把回答中的 [n] / 【n】 引用角标替换成可点击按钮（跳过 HTML 标签与代码块内部） */
 function answerHtml(text: string) {
@@ -973,10 +1023,14 @@ async function ask() {
   const version = sessionVersion
   const chat = chats.value[id]!
   const text = query.value.trim()
+  // 气泡只显示干净的问题；划词引用的 AI 原话仅作为前缀发给后端，不进气泡。
+  const sendText = quoted.value
+    ? `关于你上一条回答里的这段：「${quoted.value}」\n\n${text}`
+    : text
   const turn: Turn = { question: text }
   const turnIndex = chat.turns.push(turn) - 1
   const body = {
-    query: text,
+    query: sendText,
     conversation_id: chat.conversationId ?? null,
     candidate_k_percentage: recall.value / 100,
     allow_school_sync: allowSync.value,
@@ -988,6 +1042,8 @@ async function ask() {
       : {}),
   }
   query.value = ''
+  quoted.value = null
+  clearExcerpt() // 划词原文也做成一次性：发送即清，原文追问不再关不掉
   asking.value = true
   error.value = ''
   const seq = ++askSeq
@@ -1626,6 +1682,7 @@ onUnmounted(() => {
                       class="markdown"
                       v-html="answerHtml(turn.result.answer)"
                       @click="onAnswerClick($event, turn)"
+                      @mouseup="onAnswerSelect"
                     ></div>
                     <p v-else-if="turn.error" class="turn-error">
                       {{ turn.error }}
@@ -1659,28 +1716,23 @@ onUnmounted(() => {
               </article>
               <div ref="messagesEnd"></div>
             </section>
+            <!-- AI 回答划词后的浮动「追问」按钮：mousedown 阻断，避免清掉选区/被全局监听收起 -->
+            <button
+              v-if="quoteBtn"
+              type="button"
+              class="quote-pop"
+              :style="{ left: quoteBtn.x + 'px', top: quoteBtn.y + 'px' }"
+              @mousedown.stop.prevent="pickQuote"
+            >
+              追问这段 <ArrowRight :size="13" />
+            </button>
           </div>
  
           <div v-if="activeId" class="composer-wrap">
             <div v-if="settingsOpen" class="ask-settings">
               <label
                 >检索范围比例 <strong>{{ recall }}%</strong
-                ><input v-model.number="recall" type="range" min="5" max="100" step="5" /></label
-              ><label
-                >原文追问（可选）<select v-model="excerptDocument">
-                  <option :value="null">不附带原文</option>
-                  <option v-for="doc in readyDocs" :key="doc.id" :value="doc.id">
-                    {{ doc.filename }}
-                  </option>
-                </select></label
-              ><label v-if="excerptDocument"
-                >粘贴要讨论的原文<textarea
-                  v-model="excerpt"
-                  maxlength="10000"
-                  rows="3"
-                  placeholder="从对应文档复制一段原文…"
-                ></textarea>
-              </label>
+                ><input v-model.number="recall" type="range" min="5" max="100" step="5" /></label>
             </div>
             <div class="school-tool-settings">
               <label class="check-label"
@@ -1721,6 +1773,21 @@ onUnmounted(() => {
                 <button type="button" class="text-button" :disabled="asking || agentImageUploading || !!selectedIds.length || !!excerptDocument" @click="agentImageInput?.click()">{{ agentImageUploading ? '正在上传图片…' : '附加课表图片' }}</button>
                 <span v-if="agentImage">{{ agentImage.name }} · 本轮课表附件</span>
                 <button v-if="agentImage" type="button" class="text-button" :disabled="asking || agentImageUploading" @click="agentImage = null">移除图片附件</button>
+              </div>
+              <div v-if="quoted" class="quote-chip">
+                <ArrowRight :size="12" />
+                <span class="quote-chip-text">{{ quoted }}</span>
+                <button type="button" class="quote-chip-x" aria-label="取消引用" @click="quoted = null">
+                  <X :size="13" />
+                </button>
+              </div>
+              <div v-else-if="excerptDocument" class="quote-chip">
+                <ArrowRight :size="12" />
+                <span class="quote-chip-doc" :title="excerptDocName">{{ excerptDocName }}</span>
+                <span class="quote-chip-text">{{ excerpt }}</span>
+                <button type="button" class="quote-chip-x" aria-label="取消引用" @click="clearExcerpt">
+                  <X :size="13" />
+                </button>
               </div>
               <textarea
                 ref="composer"
@@ -1929,6 +1996,7 @@ onUnmounted(() => {
               @error="report"
               @annotate="annotateInViewer"
               @download-annotated="downloadAnnotatedCopy"
+              @quote="onViewerQuote"
             />
           </template>
  

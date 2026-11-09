@@ -6,7 +6,7 @@ import { renderAsync } from 'docx-preview'
 import { init as initPptxPreview } from 'pptx-preview'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { ArrowDownToLine, ZoomIn, ZoomOut, Hand, Highlighter, StickyNote } from 'lucide-vue-next'
+import { ArrowDownToLine, ArrowRight, ZoomIn, ZoomOut, Hand, Highlighter, StickyNote } from 'lucide-vue-next'
 import { ApiError, type CitationHighlight, type Document } from '../api'
 import { applyCitationHighlights, clearCitationHighlights } from './citationHighlight'
  
@@ -28,6 +28,8 @@ const emit = defineEmits<{
   /** 只给某一条引用写批注 */
   annotate: [index: number]
   downloadAnnotated: []
+  /** 在原文里划词后的「追问这段」：把选中文本抛给上层做划线问答 */
+  quote: [text: string]
 }>()
 
 // 已写批注的引用编号集合
@@ -38,6 +40,8 @@ const host = ref<HTMLElement | null>(null)
 const scale = ref(1.5)
 const MIN_SCALE = 0.3, MAX_SCALE = 4, SCALE_STEP = 0.15
 const panMode = ref(false) // 手掌拖动模式
+// 原文划词后的浮动「追问这段」按钮（视口坐标定位）
+const quoteBtn = ref<{ text: string; x: number; y: number } | null>(null)
  
 // 拖动状态
 let dragging = false
@@ -439,12 +443,16 @@ onMounted(() => {
   window.addEventListener('mousemove', onHostMouseMove)
   window.addEventListener('mouseup', onHostMouseUp)
   window.addEventListener('keydown', onKey)
+  window.addEventListener('mousedown', hideQuoteBtn)
+  window.addEventListener('scroll', hideQuoteBtn, true)
 })
 onUnmounted(() => {
   ro?.disconnect()
   window.removeEventListener('mousemove', onHostMouseMove)
   window.removeEventListener('mouseup', onHostMouseUp)
   window.removeEventListener('keydown', onKey)
+  window.removeEventListener('mousedown', hideQuoteBtn)
+  window.removeEventListener('scroll', hideQuoteBtn, true)
 })
  
 function onKey(e: KeyboardEvent) {
@@ -540,6 +548,33 @@ function onHostMouseUp() {
   dragging = false
   host.value.classList.remove('is-grabbing')
 }
+
+/** 在原文里划词：选区落在预览内且非手掌模式时，弹出浮动「追问这段」 */
+function onHostSelect() {
+  if (panMode.value || !host.value) {
+    quoteBtn.value = null
+    return
+  }
+  const sel = window.getSelection()
+  const text = sel?.toString().trim()
+  if (!sel || !text || !host.value.contains(sel.anchorNode) || !host.value.contains(sel.focusNode)) {
+    quoteBtn.value = null
+    return
+  }
+  const rect = sel.getRangeAt(0).getBoundingClientRect()
+  quoteBtn.value = { text: text.slice(0, 10000), x: rect.left + rect.width / 2, y: rect.top }
+}
+/** 点浮动按钮：把选中原文抛给上层 */
+function pickQuote() {
+  if (!quoteBtn.value) return
+  emit('quote', quoteBtn.value.text)
+  quoteBtn.value = null
+  window.getSelection()?.removeAllRanges()
+}
+/** 开始新选区 / 滚动时收起浮动按钮（定位会失效） */
+function hideQuoteBtn() {
+  quoteBtn.value = null
+}
  
 const pct = computed(() => `${Math.round(scale.value * 100)}%`)
 </script>
@@ -612,6 +647,17 @@ const pct = computed(() => `${Math.round(scale.value * 100)}%`)
       :class="{ 'pan-mode': panMode }"
       :style="mode === 'docx' || mode === 'text' || mode === 'pptx' ? { zoom: String(scale) } : {}"
       @mousedown="onHostMouseDown"
+      @mouseup="onHostSelect"
     ></div>
+    <!-- 原文划词后的浮动「追问这段」：mousedown 阻断，避免清掉选区/被全局监听收起 -->
+    <button
+      v-if="quoteBtn"
+      type="button"
+      class="quote-pop"
+      :style="{ left: quoteBtn.x + 'px', top: quoteBtn.y + 'px' }"
+      @mousedown.stop.prevent="pickQuote"
+    >
+      追问这段 <ArrowRight :size="13" />
+    </button>
   </section>
 </template>

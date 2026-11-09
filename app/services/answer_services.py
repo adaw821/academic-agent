@@ -69,7 +69,7 @@ def _best_anchor(db: Session, item: dict, answer: str) -> str | None:
     return best[:MAX_ANCHOR_CHARS] or None
 
 llm = ChatOpenAI(
-    model = "glm-5.3",
+    model = "glm-5.3-flash",
     base_url="https://open.bigmodel.cn/api/paas/v4/",
     api_key=os.environ["ZHIPU_API_KEY"],
     temperature=0,

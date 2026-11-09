@@ -19,7 +19,7 @@ SUMMARY_OUTPUT_TOKENS = 8_192
 SUMMARY_SAFETY_MARGIN = 1_024
 
 llm = ChatOpenAI(
-    model = "glm-5.3",
+    model = "glm-5.3-flash",
     base_url="https://open.bigmodel.cn/api/paas/v4/",
     api_key=os.environ["ZHIPU_API_KEY"],
 )
