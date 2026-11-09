@@ -164,8 +164,10 @@ def plan_assignment_query(query, history, summary, *, allow_school_sync=False, a
         'query': query, 'recent_history': [{'role': h['role'], 'content': h['content'][:1000]} for h in history[-6:]],
         'summary': summary[-2000:],
     }, ensure_ascii=False))]
-    response = invoke(model().bind_tools(schemas, tool_choice='required').bind(max_tokens=1024), messages)
+    response = invoke(model().bind_tools(schemas, tool_choice='auto').bind(max_tokens=1024), messages)
     calls = response.tool_calls
+    if not calls:
+        return None  # 模型判定不是学校任务 → 交回检索
     if response.invalid_tool_calls or len(calls) != 1:
         raise HTTPException(502, '模型未返回有效的单个学校工具调用')
     call = calls[0]

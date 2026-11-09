@@ -94,7 +94,6 @@ const chats = ref<Record<number, Chat>>({})
 const view = ref<'research' | 'timetable' | 'school'>('research')
 const activityOpen = ref(false)
 const historyLoading = ref(false)
-const schoolTools = ref(false)
 const allowSync = ref(false)
 const allowActions = ref(false)
 const agentImage = ref<{ id: string; name: string } | null>(null)
@@ -328,7 +327,7 @@ const canAsk = computed(
     !historyLoading.value &&
     !asking.value &&
     !agentImageUploading.value &&
-    (!agentImage.value || (schoolTools.value && !selectedIds.value.length && !excerptDocument.value)) &&
+    (!agentImage.value || (!selectedIds.value.length && !excerptDocument.value)) &&
     (excerptDocument.value === null || !!excerpt.value.trim()),
 )
 const days = [
@@ -674,7 +673,6 @@ function resetSession() {
   activityOpen.value = false
   error.value = ''
   notice.value = ''
-  schoolTools.value = false
   allowSync.value = false
   allowActions.value = false
   agentImage.value = null
@@ -962,13 +960,7 @@ async function ask() {
   if (!query.value.trim() || asking.value || historyLoading.value) return
   if (!activeId.value) await autoCreateProject()
   if (!activeId.value) return
-  if (schoolTools.value) {
-    // school-tools mode bypasses readyDocs requirement
-  } else if (excerptDocument.value) {
-    // excerpt mode: requires excerpt + doc match — keep original validation
-  } else if (readyDocs.value.length === 0) {
-    // No docs uploaded: let the flow proceed anyway (RAG will just have no context)
-  }
+  // 无文档也可提问:检索无上下文即走空;工具/点名由后端判。
   if (
     excerptDocument.value &&
     selectedIds.value.length &&
@@ -987,14 +979,9 @@ async function ask() {
     query: text,
     conversation_id: chat.conversationId ?? null,
     candidate_k_percentage: recall.value / 100,
-    ...(schoolTools.value
-      ? {
-          use_school_tools: true,
-          allow_school_sync: allowSync.value,
-          allow_school_actions: allowActions.value,
-          ...(agentImage.value ? { timetable_image_id: agentImage.value.id } : {}),
-        }
-      : {}),
+    allow_school_sync: allowSync.value,
+    allow_school_actions: allowActions.value,
+    ...(agentImage.value ? { timetable_image_id: agentImage.value.id } : {}),
     ...(selectedIds.value.length ? { doc_ids: [...selectedIds.value] } : {}),
     ...(excerptDocument.value
       ? { document_id: excerptDocument.value, selected_text: excerpt.value.trim() }
@@ -1563,7 +1550,10 @@ onUnmounted(() => {
                 <div class="welcome-toolbar">
                   <div class="welcome-toggles">
                     <label class="check-label"
-                      ><input v-model="schoolTools" type="checkbox" :disabled="asking" />学校助手</label
+                      ><input v-model="allowSync" type="checkbox" :disabled="asking" />允许同步课程</label
+                    >
+                    <label class="check-label"
+                      ><input v-model="allowActions" type="checkbox" :disabled="asking" />允许下载、导入、已读和课表操作</label
                     >
                     <label class="check-label"
                       ><input v-model="durableAsk" type="checkbox" :disabled="asking" />后台问答
@@ -1578,17 +1568,9 @@ onUnmounted(() => {
                       ></label
                     >
                   </div>
-                  <template v-if="schoolTools">
-                    <label class="check-label"
-                      ><input v-model="allowSync" type="checkbox" :disabled="asking" />允许同步课程</label
-                    >
-                    <label class="check-label"
-                      ><input v-model="allowActions" type="checkbox" :disabled="asking" />允许下载、导入、已读和课表操作</label
-                    >
-                    <small class="welcome-toolbar-note"
-                      >仅按本轮明确要求执行。课表操作包含学校获取、图片补充、增删改；学校密码请在弹出的学校窗口输入。</small
-                    >
-                  </template>
+                  <small class="welcome-toolbar-note"
+                    >仅按本轮明确要求执行。课表操作包含学校获取、图片补充、增删改；学校密码请在弹出的学校窗口输入。</small
+                  >
                 </div>
               </div>
             </section>
@@ -1702,22 +1684,17 @@ onUnmounted(() => {
             </div>
             <div class="school-tool-settings">
               <label class="check-label"
-                ><input v-model="schoolTools" type="checkbox" :disabled="asking" />学校助手</label
-              >
-              <template v-if="schoolTools"
-                ><label class="check-label"
-                  ><input
-                    v-model="allowSync"
-                    type="checkbox"
-                    :disabled="asking"
-                  />允许同步课程</label
-                ><label class="check-label"
-                  ><input
-                    v-model="allowActions"
-                    type="checkbox"
-                    :disabled="asking"
-                  />允许下载、导入、已读和课表操作</label
-                ></template
+                ><input
+                  v-model="allowSync"
+                  type="checkbox"
+                  :disabled="asking"
+                />允许同步课程</label
+              ><label class="check-label"
+                ><input
+                  v-model="allowActions"
+                  type="checkbox"
+                  :disabled="asking"
+                />允许下载、导入、已读和课表操作</label
               >
               <label class="check-label"
                 ><input
@@ -1734,12 +1711,12 @@ onUnmounted(() => {
                   ></span
                 ></label
               >
-              <small v-if="schoolTools"
+              <small
                 >仅按本轮明确要求执行。课表操作包含学校获取、图片补充、增删改；学校密码请在弹出的学校窗口输入。选定文档或附带原文时优先文档问答。</small
               >
             </div>
             <form class="composer" @submit.prevent="ask">
-              <div v-if="schoolTools" class="field-row">
+              <div class="field-row">
                 <input ref="agentImageInput" class="visually-hidden" type="file" accept="image/png,image/jpeg" aria-label="附加课表图片" @change="attachAgentImage" />
                 <button type="button" class="text-button" :disabled="asking || agentImageUploading || !!selectedIds.length || !!excerptDocument" @click="agentImageInput?.click()">{{ agentImageUploading ? '正在上传图片…' : '附加课表图片' }}</button>
                 <span v-if="agentImage">{{ agentImage.name }} · 本轮课表附件</span>
@@ -1756,7 +1733,7 @@ onUnmounted(() => {
                     ? '登录后，开启与你的资料的第一场对话…'
                     : !activeId
                       ? '创建项目，开始整理你的研究资料…'
-                      : schoolTools && !selectedIds.length && !excerptDocument
+                      : !selectedIds.length && !excerptDocument
                         ? '查询学校作业、课表、提醒，或明确要求执行操作…'
                         : !readyDocs.length
                           ? '先上传资料，待解析完成后即可提问…'

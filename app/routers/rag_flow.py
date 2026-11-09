@@ -466,8 +466,8 @@ def execute_qa(project_id, request, db, user, *, checkpoints=None, local_browser
             performance_logger.info("event=qa_route route=overview")
             return {"route": "overview", "overview_plan": plan}
 
-        # 工具:没勾选也没点名文档时才考虑。
-        if request.use_school_tools and request.doc_ids is None and request.document_id is None and not named:
+        # 工具:没指定、也没点名文档时才考虑(由路由自己判,不再用 use_school_tools 开关)。
+        if request.doc_ids is None and request.document_id is None and not named:
             from app.services.school_qa import plan_assignment_query
             tool = plan_assignment_query(
                 request.query, state["history"], state["summary"],
@@ -543,7 +543,7 @@ def execute_qa(project_id, request, db, user, *, checkpoints=None, local_browser
         "rerank": rerank, "selection_retrieve": selection_retrieve, "answer": answer, "save": save,
         "route": route, "overview_retrieve": overview_retrieve,
     }
-    if request.use_school_tools and request.doc_ids is None and request.document_id is None:
+    if request.doc_ids is None and request.document_id is None:
         from app.services.school_qa import plan_assignment_query, query_assignments, answer_assignments
 
         def assignment_query(state):
