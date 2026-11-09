@@ -21,6 +21,9 @@ answer_stub = types.ModuleType("app.services.answer_services")
 answer_stub.generate_answer = Mock(return_value={"answer": "test", "sources": []})
 answer_stub.get_history_messages = Mock(return_value=([], "", None))
 answer_stub.llm = Mock()
+answer_stub.CONTEXT_LIMIT = 32_768
+answer_stub.RESERVED_OUTPUT_TOKENS = 8_192
+answer_stub.SAFETY_MARGIN = 1_024
 translator_stub = types.ModuleType("langchain_openai")
 translator_stub.ChatOpenAI = Mock()
 translator_stub.ChatOpenAI.return_value.invoke.return_value = types.SimpleNamespace(

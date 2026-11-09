@@ -118,8 +118,6 @@ class SchoolCourseQATests(unittest.TestCase):
         for args in [{'user_id': 2}, {'content_state': 'school_empty'}, {'limit': 100}]:
             self.course_plan(**args)
             self.assertEqual(self.ask().status_code, 502)
-        self.course_plan()
-        self.assertEqual(self.ask(use_school_tools=False).json()['answer'], 'document answer')
         with patch.object(rag, 'search_document_first', return_value=[]):
             self.assertEqual(self.ask(doc_ids=[1]).json()['answer'], 'document answer')
         self.client.cookies.clear()

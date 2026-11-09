@@ -9,10 +9,9 @@ class SearchRequest(BaseModel):
 
     # 用户问题：支持长题设，按字符数限制，不截断内容。
     query: str = Field(min_length=1, max_length=10000)
-    use_school_tools: bool = Field(default=False, description="允许模型查询当前账号的本地学校数据；指定文档或选区时仍只查询文档。")
-    allow_school_actions: bool = Field(default=False, description="允许学校课表获取、图片补充、课表增删改、下载附件、导入当前项目和标记提醒已读，需同时开启 use_school_tools")
+    allow_school_actions: bool = Field(default=False, description="允许学校课表获取、图片补充、课表增删改、下载附件、导入当前项目和标记提醒已读。")
     timetable_image_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$', description='本轮课表图片附件，由上传接口返回，服务器校验账号归属')
-    allow_school_sync: bool = Field(default=False, description="与 use_school_tools 同时开启时，允许同步单门课程；本地名称未匹配时自动发现学校课程并在唯一匹配后首次导入。指定文档或选区时不执行同步。")
+    allow_school_sync: bool = Field(default=False, description="允许同步单门课程；本地名称未匹配时自动发现学校课程并在唯一匹配后首次导入。指定文档或选区时不执行同步。")
     #需要检索子片占总体子片的百分比
     candidate_k_percentage: float = Field(
         default=0.4, gt=0, le=1, allow_inf_nan=False,
@@ -33,8 +32,8 @@ class SearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_selection(self) -> "SearchRequest":
-        if self.timetable_image_id and (not self.use_school_tools or self.doc_ids or self.document_id):
-            raise ValueError('课表图片需开启学校助手，且不能同时限定文档或选区')
+        if self.timetable_image_id and (self.doc_ids or self.document_id):
+            raise ValueError('课表图片不能同时限定文档或选区')
         if (self.document_id is None) != (self.selected_text is None):
             raise ValueError("document_id 和 selected_text 必须一起提供")
         if self.document_id is not None and self.doc_ids is not None and self.document_id not in self.doc_ids:

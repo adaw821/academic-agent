@@ -100,8 +100,8 @@ class SchoolSyncQATests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 403)
         self.collect.assert_not_called()
 
-    def test_document_scope_and_disabled_tools_never_sync(self):
-        for args in ({'doc_ids': [1]}, {'document_id': 1, 'selected_text': 'sync this'}, {'use_school_tools': False}):
+    def test_document_scope_never_syncs(self):
+        for args in ({'doc_ids': [1]}, {'document_id': 1, 'selected_text': 'sync this'}):
             with patch.object(rag, 'search_document_first', return_value=[]):
                 self.assertEqual(self.ask(**args).json()['answer'], 'document answer')
         self.llm.bind_tools.assert_not_called()

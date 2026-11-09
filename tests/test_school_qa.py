@@ -81,9 +81,9 @@ class SchoolQATests(unittest.TestCase):
             saved = db.scalar(select(Message).where(Message.conversation_id == result['conversation_id'], Message.role == 'assistant'))
             self.assertEqual(saved.response_data['tool_results'][0]['total'], 1)
 
-    def test_default_and_explicit_document_scope_keep_document_flow(self):
-        for args in ({}, {'use_school_tools': True, 'doc_ids': [1]},
-                     {'use_school_tools': True, 'document_id': 1, 'selected_text': 'original'}):
+    def test_explicit_document_scope_keeps_document_flow(self):
+        for args in ({'doc_ids': [1]},
+                     {'document_id': 1, 'selected_text': 'original'}):
             with self.subTest(args=args), patch.object(rag, 'search_document_first', return_value=[]):
                 response = self.client.post('/api/projects/1/ask', json={'query': 'Explain the document', **args})
                 self.assertEqual(response.status_code, 200, response.text)
@@ -98,10 +98,12 @@ class SchoolQATests(unittest.TestCase):
         self.assertEqual(response.json()['answer'], 'document answer')
         rag.retrieve_documents.assert_called_once()
 
-    def test_missing_tool_choice_never_silently_falls_into_document_search(self):
+    def test_no_tool_choice_falls_back_to_document_retrieval(self):
         self.planner.invoke.return_value = AIMessage(content='Unstructured reply')
-        self.assertEqual(self.ask().status_code, 502)
-        rag.retrieve_documents.assert_not_called()
+        response = self.ask()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['answer'], 'document answer')
+        rag.retrieve_documents.assert_called_once()
 
     def test_auth_project_scope_and_tool_argument_isolation(self):
         self.assertEqual(self.client.post('/api/projects/2/ask', json={'query': '作业', 'use_school_tools': True}).status_code, 403)
