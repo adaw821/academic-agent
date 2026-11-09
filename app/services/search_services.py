@@ -112,7 +112,11 @@ def rewrite_query(
     ):
         raise HTTPException(status_code=400, detail="问题和历史超过问题改写的输入预算，请减少输入。")
 
-    response = llm.bind(max_tokens=REWRITE_OUTPUT_TOKENS).invoke(messages)
+    response = llm.bind(
+    max_tokens=REWRITE_OUTPUT_TOKENS,
+    extra_body={"reasoning_effort": "low"},
+    ).invoke(messages)
+    
     if response.response_metadata.get("finish_reason") == "length":
         raise HTTPException(status_code=502, detail="问题改写达到输出上限，未继续检索。")
     if not isinstance(response.content, str):

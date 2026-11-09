@@ -8,6 +8,7 @@ import logging
 from time import perf_counter
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -31,12 +32,10 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 translator = ChatOpenAI(
-    model = "glm-4.5-airx",
+    model="glm-4.5-airx",
     base_url="https://open.bigmodel.cn/api/paas/v4/",
     api_key=os.environ["ZHIPU_API_KEY"],
-    timeout=15,
-    max_retries=0,
-    temperature=0,
+    extra_body={"reasoning_effort": "low"},
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -388,8 +387,8 @@ def user_asking(
                       local_browser_allowed=bool(http_request.client and http_request.client.host in {'127.0.0.1', '::1'}))
 
 
-def execute_qa(project_id, request, db, user, *, checkpoints=None, local_browser_allowed=False):
-    """Execute synchronously or under a durable run with the same graph."""
+def _build_qa_graph(project_id, request, db, user, *, checkpoints=None, local_browser_allowed=False):
+    """Build the compiled QA graph; execute_qa invokes it, stream_qa_events streams it."""
     if checkpoints is not None:
         db.info["durable_workflow"] = True
     def validate(state):
@@ -556,5 +555,60 @@ def execute_qa(project_id, request, db, user, *, checkpoints=None, local_browser
         nodes.update(assignment_query=assignment_query, assignment_answer=assignment_answer)
     if checkpoints is not None:
         nodes = checkpoints.wrap(nodes, uncached={"validate", "save"})
-    graph = build_qa_graph(nodes)
+    return build_qa_graph(nodes)
+
+
+def execute_qa(project_id, request, db, user, *, checkpoints=None, local_browser_allowed=False):
+    """Run the QA graph and return the full result dict (sync /ask and durable jobs)."""
+    graph = _build_qa_graph(project_id, request, db, user,
+                            checkpoints=checkpoints, local_browser_allowed=local_browser_allowed)
     return graph.invoke({})["result"]
+
+
+def _sse(kind: str, data) -> str:
+    """一条 SSE 事件：data: {"type": kind, "data": data}\\n\\n。不记录正文到日志。"""
+    return "data: " + json.dumps({"type": kind, "data": data}, ensure_ascii=False) + "\n\n"
+
+
+def stream_qa_events(project_id, request, db, user, *, local_browser_allowed=False):
+    """跑同一张图,只把 answer 节点的 token 作为 SSE 流式吐出;来源依赖整段答案,最后随 done 一次性发。"""
+    graph = _build_qa_graph(project_id, request, db, user, local_browser_allowed=local_browser_allowed)
+    final_result = None
+    try:
+        for mode, chunk in graph.stream({}, stream_mode=["messages", "values"]):
+            if mode == "messages":
+                message, meta = chunk
+                if meta.get("langgraph_node") == "answer":
+                    text = getattr(message, "content", "") or ""
+                    if text:
+                        yield _sse("token", {"text": text})
+            elif mode == "values" and isinstance(chunk, dict) and chunk.get("result"):
+                final_result = chunk["result"]
+    except HTTPException as exc:
+        yield _sse("error", {"detail": exc.detail})
+        return
+    except Exception as exc:  # 不把问题/正文/异常详情写日志
+        logger.warning("event=qa_stream_failed error_type=%s", type(exc).__name__)
+        yield _sse("error", {"detail": "回答生成失败，请重试。"})
+        return
+    if final_result is None:
+        yield _sse("error", {"detail": "回答生成失败，请重试。"})
+        return
+    yield _sse("done", final_result)
+
+
+@router.post("/projects/{project_id}/ask/stream")
+def user_asking_stream(
+    project_id: int,
+    request: SearchRequest,
+    http_request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_currentUser),
+):
+    """流式问答:SSE 逐 token 吐正文,结束发 done(含 sources/conversation_id)。durable 任务仍走 /ask/jobs。"""
+    local = bool(http_request.client and http_request.client.host in {'127.0.0.1', '::1'})
+    return StreamingResponse(
+        stream_qa_events(project_id, request, db, user, local_browser_allowed=local),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

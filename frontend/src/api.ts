@@ -144,6 +144,75 @@ export const post = <T>(url: string, body: unknown, signal?: AbortSignal) =>
     ...(signal ? { signal } : {}),
   })
 
+export interface StreamHandlers {
+  /** 每来一段正文 token */
+  onToken: (text: string) => void
+  /** 结束：带完整答案（含 sources / conversation_id） */
+  onDone: (answer: Answer) => void
+}
+
+/** 流式问答：读 SSE，逐 token 回调；done 给完整 Answer，error 抛 ApiError。 */
+export async function streamAsk(
+  url: string,
+  body: unknown,
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  let response: Response
+  try {
+    response = await fetch(`/api${url}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      credentials: 'same-origin',
+      ...(signal ? { signal } : {}),
+    })
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') throw e
+    throw new ApiError(0, '无法连接服务，请检查网络与后端运行状态。')
+  }
+  if (!response.ok || !response.body) {
+    const payload = await response.json().catch(() => null)
+    const detail = payload?.detail
+    const message =
+      typeof detail === 'string'
+        ? detail
+        : response.status >= 500
+          ? '服务暂时不可用，请确认后端已启动后重试。'
+          : `请求失败（${response.status}）`
+    throw new ApiError(response.status, message, detail?.code)
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let idx: number
+    while ((idx = buffer.indexOf('\n\n')) !== -1) {
+      const frame = buffer.slice(0, idx)
+      buffer = buffer.slice(idx + 2)
+      const dataLine = frame.split('\n').find((line) => line.startsWith('data:'))
+      if (!dataLine) continue
+      let evt: { type: string; data: unknown }
+      try {
+        evt = JSON.parse(dataLine.slice(5).trim())
+      } catch {
+        continue
+      }
+      if (evt.type === 'token') {
+        handlers.onToken((evt.data as { text: string }).text)
+      } else if (evt.type === 'done') {
+        handlers.onDone(evt.data as Answer)
+      } else if (evt.type === 'error') {
+        const detail = (evt.data as { detail?: string }).detail
+        throw new ApiError(500, detail || '回答生成失败，请重试。')
+      }
+    }
+  }
+}
+
 /** 文件内 AI 批注（docx 批注 / pdf 高亮 / pptx 备注） */
 export interface DocumentAnnotation {
   id: number

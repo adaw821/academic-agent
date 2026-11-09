@@ -49,6 +49,28 @@ py -3.13 -m venv .venv
 
 上述 `.venv` 是新安装示例。本仓库当前开发环境若使用 `agent`，请将命令中的 `.venv` 换成 `agent`。安装依赖和启动后端必须使用同一个 Python 解释器，避免装到了系统 Python 而后端仍提示模块缺失。
 
+#### （强烈建议）用 NVIDIA 显卡给检索重排提速
+
+问答链路里的重排模型（`BAAI/bge-reranker-v2-m3`，交叉编码器）和向量嵌入默认在 CPU 上运行。CPU 下一次重排可达 **15~20 秒**，是问答延迟的主要来源之一；换到 GPU 后通常降到 **亚秒级**（无需改任何代码，`sentence-transformers` 会自动使用 CUDA）。
+
+如果机器有 NVIDIA 显卡，`pip install -r requirements.txt` 装到的是 **CPU 版 torch**，需手动换成 CUDA 版：
+
+1. 查驱动支持的 CUDA 版本：运行 `nvidia-smi`，看右上角 `CUDA Version`（如 `12.6` → 用 `cu126` 轮子）。
+2. **先停掉后端**（Windows 下服务运行时会锁住 torch 的 DLL，装不上），确保磁盘有 **≥10 GB** 空闲（CUDA 版 torch 轮子约 2.6 GB，安装峰值约 5 GB）。
+3. 用**显式 `+cuXXX` 标记**安装，避免 pip 把已装的 `+cpu` 当成「已满足」而跳过（解释器按实际环境替换 `.venv` / `agent`）：
+
+```powershell
+.\agent\Scripts\python.exe -m pip install --no-cache-dir torch==2.14.0+cu126 torchvision==0.29.0+cu126 --index-url https://download.pytorch.org/whl/cu126
+```
+
+4. 验证：
+
+```powershell
+.\agent\Scripts\python.exe -c "import torch; ok=torch.cuda.is_available(); print(ok, torch.cuda.get_device_name(0) if ok else 'CPU')"
+```
+
+输出形如 `True NVIDIA GeForce RTX 4060 Laptop GPU` 即成功，重启后端即可。注意：此改动只在本地虚拟环境里，**不随 git 版本管理**——重建环境或换机器后需重新执行。无 NVIDIA 显卡时保持 CPU 版即可，功能不受影响，仅重排较慢。
+
 ### 2.2 准备数据库
 
 已有 PostgreSQL 的用户可以创建 `academic_agent` 数据库并在其中启用 `vector` 扩展。**安装 Python 的 pgvector 包不能代替数据库扩展。**

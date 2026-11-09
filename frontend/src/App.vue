@@ -49,6 +49,7 @@ import {
   annotatedFileUrl,
   post,
   request,
+  streamAsk,
   type Answer,
   type CitationHighlight,
   type Course,
@@ -1059,11 +1060,34 @@ async function ask() {
       chat.turns[turnIndex]!.jobId = result.job_id
       await pollAnswer(id, chat, turnIndex, result.job_id, version)
     } else {
-      const result = await post<Answer>(`/projects/${id}/ask`, body, signal)
-      if (version !== sessionVersion) return
-      if (seq !== askSeq || askInterrupted) return
-      chat.turns[turnIndex]!.result = result
-      chat.conversationId = result.conversation_id
+      await streamAsk(
+        `/projects/${id}/ask/stream`,
+        body,
+        {
+          onToken: (text) => {
+            if (version !== sessionVersion || seq !== askSeq || askInterrupted) return
+            const turn = chat.turns[turnIndex]
+            if (!turn) return
+            if (!turn.result) {
+              turn.result = {
+                answer: '',
+                sources: [],
+                retrieved_contexts: [],
+                conversation_id: chat.conversationId ?? 0,
+              }
+            }
+            turn.result.answer += text
+          },
+          onDone: (answer) => {
+            if (version !== sessionVersion || seq !== askSeq || askInterrupted) return
+            const turn = chat.turns[turnIndex]
+            if (!turn) return
+            turn.result = answer
+            chat.conversationId = answer.conversation_id
+          },
+        },
+        signal,
+      )
     }
     if (version === sessionVersion && chat.turns[turnIndex]?.result?.tool_results?.some(
       item => item.tool === 'supplement_timetable_image',

@@ -73,6 +73,9 @@ llm = ChatOpenAI(
     base_url="https://open.bigmodel.cn/api/paas/v4/",
     api_key=os.environ["ZHIPU_API_KEY"],
     temperature=0,
+    # 开启内部流式：.invoke() 改为边收边触发 token 回调，
+    # langgraph stream_mode="messages" 才能逐 token 抽出做 SSE。
+    streaming=True,
 )
 
 
@@ -293,7 +296,11 @@ def generate_answer(
     ]
 
     with measure_stage("qa.answer_llm"):
-        response = llm.bind(max_tokens=RESERVED_OUTPUT_TOKENS).invoke(messages)
+        # reasoning_effort=low：答案是「据提供资料作答」，不需深推理，压低强制思考以砍生成时间。
+        response = llm.bind(
+            max_tokens=RESERVED_OUTPUT_TOKENS,
+            extra_body={"reasoning_effort": "low"},
+        ).invoke(messages)
     if response.response_metadata.get("finish_reason") == "length":
         raise HTTPException(status_code=502, detail="回答生成达到输出上限，本轮问答未保存，请缩小问题范围后重试。")
     if not isinstance(response.content, str) or not response.content.strip():
