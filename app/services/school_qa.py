@@ -17,6 +17,7 @@ from app.services.school_reminder_qa import ReminderQuery, query_deadline_remind
 from app.services.school_timetable_qa import TimetableQuery, query_timetable, TOOL_NAME as TIMETABLE_TOOL_NAME
 from app.services.school_sync_qa import CourseSyncQuery, sync_school_course, answer_course_sync, TOOL_NAME as SYNC_TOOL_NAME
 from app.services.school_course_qa import CourseQuery, query_courses, TOOL_NAME as COURSES_TOOL_NAME
+from app.services.school_peek_qa import PeekQuery, peek_latest_assignments, TOOL_NAME as PEEK_TOOL_NAME
 
 from app.services.school_actions import ACTION_SCHEMAS, execute_action, answer_action
 from app.services import timetable_actions
@@ -109,6 +110,10 @@ def _build_school_messages(query, history, summary, *, has_timetable_image=False
         'name': TIMETABLE_TOOL_NAME,
         'description': '查询当前账号已保存的每周课表、上课时间、地点和教师，可按课程及星期或日期筛选。按已配置学期及单双周筛选，未配置记录仅按星期匹配，未纳入临时调课。',
         'parameters': TimetableQuery.model_json_schema(),
+    }}, {'type': 'function', 'function': {
+        'name': PEEK_TOOL_NAME,
+        'description': '实时读取一门已关联学校来源的本地课程的最新作业，并与本地对比，返回新增、截止/标题变化、本地有但本次未读到的差异。只读，不写库、不下载、不同步；用于回答“学校上最新有什么/有没有更新”后再由用户决定是否同步。',
+        'parameters': PeekQuery.model_json_schema(),
     }}]
     schemas.extend({'type': 'function', 'function': {'name': name, 'description': description,
                     'parameters': schema.model_json_schema()}}
@@ -132,7 +137,9 @@ def _build_school_messages(query, history, summary, *, has_timetable_image=False
         '“没有内容”通常用 no_synced_content，“没课件”用 no_resources，“没同步过”用 not_synced；不把无内容当作请求同步。'
         '如果用户在谈当前知识库正文而非课程元数据，应走文档问答或先澄清，不能用资源数量证明正文已入库。'
         '用户要查询自己的学校作业清单、DDL或提交状态时，'
-        '调用一次 query_assignments。未交对应 pending；含义不明确时不要猜测筛选条件。'
+        '调用一次 query_assignments，读取的是最近一次同步的本地副本。未交对应 pending；含义不明确时不要猜测筛选条件。'
+        '用户想知道学校上“最新/有没有更新/现在实际有什么作业”，或怀疑本地不是最新时，对一门指定课程调用 peek_latest_assignments：'
+        '它实时读取学校页并与本地对比，只读不写。拿到差异后如实说明并询问是否需要同步，不要自行调用 sync；未指定课程时留空以请求澄清。'
         '查某份作业的题目文件在哪里、有哪些附件或是否导入时，调用 query_assignment_resources。'
         '作业名称使用 assignment_name，不把 Lab 1 中的数字当成本地作业 ID；未明确作业时留空以请求澄清。每轮至多调用一个工具。'
         '用户明确查询站内提醒、未读提醒或提醒历史时，调用 query_deadline_reminders；未读用 unread_only=true，历史用 active_only=false。'
@@ -189,8 +196,8 @@ def _call_to_plan(call, query):
     today = datetime.now(CHINA).date()
     query_schemas = {TOOL_NAME: AssignmentQuery, RESOURCE_TOOL_NAME: AssignmentResourceQuery,
                      REMINDER_TOOL_NAME: ReminderQuery, TIMETABLE_TOOL_NAME: TimetableQuery,
-                     COURSES_TOOL_NAME: CourseQuery, CLARIFY_TOOL_NAME: SchoolClarification,
-                     DOCUMENT_TOOL_NAME: DocumentRoute}
+                     COURSES_TOOL_NAME: CourseQuery, PEEK_TOOL_NAME: PeekQuery,
+                     CLARIFY_TOOL_NAME: SchoolClarification, DOCUMENT_TOOL_NAME: DocumentRoute}
     query_schemas.update({name: value[0] for name, value in timetable_actions.READ_SCHEMAS.items()})
     query_schemas[SYNC_TOOL_NAME] = CourseSyncQuery
     query_schemas.update({name: value[0] for name, value in ACTION_SCHEMAS.items()})
@@ -240,7 +247,7 @@ WRITE_TOOLS = set(ACTION_SCHEMAS) - DIRECT_ACTIONS
 # 只读查询工具：结果可作为 ToolMessage 喂回循环、让模型决定下一步。其它工具（写/确认/
 # sync/澄清/文档）一律终止循环，按单发原样渲染，行为与循环前完全一致。
 LOOP_READ_TOOLS = {TOOL_NAME, COURSES_TOOL_NAME, TIMETABLE_TOOL_NAME,
-                   RESOURCE_TOOL_NAME, REMINDER_TOOL_NAME}
+                   RESOURCE_TOOL_NAME, REMINDER_TOOL_NAME, PEEK_TOOL_NAME}
 MAX_AGENT_STEPS = 3  # 一轮内最多串几个只读工具；到顶强制收尾，绝不无限转。
 # 续写步的系统提示：允许「不再调用工具＝已可回答」，替换掉单发规划器「必须调用一个工具」的口径。
 CONTINUE_PROMPT = (
@@ -291,6 +298,9 @@ def query_assignments(db, user_id, plan, *, project_id=None, confirmed=False):
     if plan['name'] == COURSES_TOOL_NAME:
         return dict(query_courses(db, user_id, plan['args']), tool=COURSES_TOOL_NAME,
                     filters=plan['args'], queried_at=datetime.now(CHINA).isoformat())
+    if plan['name'] == PEEK_TOOL_NAME:
+        return dict(peek_latest_assignments(db, user_id, plan['args']),
+                    filters=plan['args'], queried_at=datetime.now(CHINA).isoformat(), timezone='Asia/Shanghai')
     if plan['name'] in ACTION_SCHEMAS:
         if plan['name'] in WRITE_TOOLS and not confirmed:
             return _confirm_required(plan)
@@ -367,6 +377,8 @@ ANSWER_PROMPT = (
     '课表来自已保存的每周安排，不是学校实时校历。calendar_configured 为 true 时按学期及单双周筛选，否则仅按星期匹配；未纳入临时调课，不能保证当天实际开课。'
     '课表的 unrecognized_day_count 大于零时说明有记录的星期无法识别、筛选可能不完整，不猜测星期或缺失的教师地点。'
     '如果用户要求修改或删除而本轮仅查询了课表，明确尚未执行修改，列出匹配安排的 id、course_id 和时间地点，便于下一轮准确定位；有歧义时请用户选择。'
+    'peek_latest_assignments 是实时读取学校课程页并与本地对比的结果：new 是学校有而本地没有的作业，changed 是截止时间或标题与本地不一致的，not_seen 是本地有但本次未读到的；'
+    '这是只读对比、未写入本地也未同步，不能声称已同步或已更新本地；如有差异应说明并询问用户是否需要同步，不要替用户决定。'
     '多步查询时综合所有 tool 消息回答，不重复罗列中间结果。'
 )
 

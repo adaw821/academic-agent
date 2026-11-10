@@ -348,3 +348,20 @@ class ISpaceClient:
             item['assignment_external_ids'] = sorted(assignment_refs.get(item['source_key'], set()))
         snapshot.warnings.append('已收集资源链接、一层 Page 内容及 Folder 文件树附件；附件需单独下载并导入项目。')
         return snapshot
+
+    def collect_assignments(self, url):
+        """Read-only: a course's assignments with per-assignment due/status only.
+
+        Lighter than collect_course (skips resources, Pages and Folder trees) so a
+        live peek stays fast. Never writes; the caller diffs against local data.
+        """
+        url = activity_url(url, '/course/view.php')
+        snapshot = parse_course(self.get_html(url), url)
+        if len(snapshot.assignments) > 200:
+            raise SchoolError('课程规模超出单次读取限制')
+        for assignment in snapshot.assignments:
+            detail, _ = parse_assignment(self.get_html(assignment['source_url']))
+            # Detail view is authoritative, including a removed deadline.
+            assignment.update(detail)
+        snapshot.resources = []
+        return snapshot
