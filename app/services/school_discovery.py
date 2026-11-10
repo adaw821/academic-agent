@@ -31,11 +31,11 @@ def page_session_key(soup):
     return None
 
 
-def fetch_page(client, key, offset):
+def fetch_page(client, key, offset, *, current_only=False):
     try:
         response = client.client.post(ORIGIN + '/lib/ajax/service.php', params={'sesskey': key}, json=[{
             'index': 0, 'methodname': METHOD,
-            'args': {'classification': 'allincludinghidden', 'limit': PAGE_SIZE,
+            'args': {'classification': 'inprogress' if current_only else 'allincludinghidden', 'limit': PAGE_SIZE,
                      'offset': offset, 'sort': 'fullname ASC, id ASC'},
         }])
     except httpx.RequestError:
@@ -80,7 +80,7 @@ def fetch_page(client, key, offset):
     return courses, nextoffset
 
 
-def discover_courses(client):
+def discover_courses(client, *, current_only=False):
     soup = soup_page(client.get_html(ORIGIN + '/my/courses.php'))
     found = {}
     for anchor in soup.select('a[href*="/course/view.php"]'):
@@ -99,7 +99,7 @@ def discover_courses(client):
         warning = '达到课程分页上限，列表可能不完整'
         for _ in range(MAX_PAGES):
             try:
-                courses, nextoffset = fetch_page(client, key, offset)
+                courses, nextoffset = fetch_page(client, key, offset, current_only=current_only)
             except SchoolLoginRequired:
                 raise
             except SchoolError as exc:
@@ -117,5 +117,5 @@ def discover_courses(client):
             dynamic.update(courses)
             offset = nextoffset
     # Prefer validated API names over potentially stale HTML titles on partial results.
-    combined = dict(found, **dynamic)
+    combined = dict(dynamic) if current_only else dict(found, **dynamic)
     return dict(courses=list(combined.values())[:MAX_COURSES], complete=False, warning=warning)

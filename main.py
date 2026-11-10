@@ -41,6 +41,8 @@ app.include_router(assignments_router, prefix="/api")
 app.include_router(course_sync_router, prefix="/api")
 app.include_router(library_router, prefix="/api")
 app.include_router(school_router, prefix="/api")
+from app.routers.school_account import router as school_account_router
+app.include_router(school_account_router, prefix="/api")
 
 from app.routers.annotations import router as annotations_router
 app.include_router(annotations_router, prefix="/api")

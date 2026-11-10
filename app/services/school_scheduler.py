@@ -19,6 +19,13 @@ class SyncAlreadyRunning(RuntimeError):
     pass
 
 
+_owned_locks = threading.local()
+
+
+def owns_sync_lock(user_id):
+    return user_id in getattr(_owned_locks, 'users', set())
+
+
 def validate_options(user_id, interval_seconds):
     if type(user_id) is not int or user_id <= 0:
         raise ValueError('user_id must be a positive local user ID')
@@ -52,8 +59,10 @@ def user_sync_lock(user_id):
                 raise SyncAlreadyRunning('this user already has a local sync worker') from None
             raise
         try:
+            _owned_locks.users = getattr(_owned_locks, 'users', set()) | {user_id}
             yield
         finally:
+            _owned_locks.users.discard(user_id)
             handle.seek(0)
             release()
 

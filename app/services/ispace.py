@@ -295,9 +295,9 @@ class ISpaceClient:
             return response.text
         raise SchoolError('学校跳转次数过多')
 
-    def discover_courses(self):
+    def discover_courses(self, *, current_only=False):
         from app.services.school_discovery import discover_courses
-        return discover_courses(self)
+        return discover_courses(self, current_only=current_only)
 
     def collect_course(self, url):
         url = activity_url(url, '/course/view.php')

@@ -560,17 +560,6 @@ textarea {
   text-align: center;
   padding: 54px 38px 28px;
 }
-/* 登录后默认页：底图铺满整个 research-main */
-.welcome-full-bg {
-  position: absolute;
-  inset: 0;
-  background-image: url('/welcome-paper.jpg');
-  background-size: cover;
-  background-position: center;
-  opacity: 0.28;
-  pointer-events: none;
-  z-index: 0;
-}
 .welcome.welcome-default {
   position: relative;
   z-index: 1;

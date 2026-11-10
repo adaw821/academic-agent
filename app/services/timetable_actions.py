@@ -47,10 +47,10 @@ class CourseDetails(EmptyArgs):
 
 READ_SCHEMAS = {'get_mis_timetable': (EmptyArgs, '查看学校课表获取进度、已保存快照的学期和课程明细；不打开浏览器，不包含登录凭据。')}
 ACTION_SCHEMAS = {
-    'open_mis_timetable': (EmptyArgs, '用户要求从学校获取课表时打开本机 MIS 窗口。用户需自行登录和选择学期；打开不等于保存成功。'),
+    'open_mis_timetable': (EmptyArgs, '用户要求从学校获取课表时调用。已保存学生凭据的账号在后台同步课程和课表，无需用户登录窗口；其他账号使用本机 MIS 窗口。以返回状态为准。'),
     'save_mis_timetable': (EmptyArgs, '用户表示已登录、选好学期并明确要求保存时，保存当前学校窗口课表；返回的是进度，需后续查询确认成功。'),
     'cancel_mis_timetable': (EmptyArgs, '取消当前账号的学校课表获取，保留原快照。'),
-    'supplement_timetable_image': (ImageSupplement, '用户明确要求识别图片补充课表时调用。attachment 使用本轮附件，mis 使用已保存学校截图；追加去重，不删除旧错误记录，不自动继承学期。'),
+    'supplement_timetable_image': (ImageSupplement, '用户要求补充课表时调用。attachment 识别本轮图片；mis 优先直接导入学校结构化课程明细及学期名称，无明细时才使用截图。追加去重，保留旧记录，不猜测教学日期。'),
     'add_timetable_entry': (NewSchedule, '手动新增一个上课时段；已有课程按编号或名称关联。必须有课程名称、星期和明确的起止时间。'),
     'update_timetable_entry': (UpdateSchedule, '修改已查询到的一个安排的星期、起止时间和地点，保留学期规则。需要填写全部时间地点字段，未改变字段取自查询结果。'),
     'delete_timetable_entry': (ScheduleID, '用户明确要求删除一个已定位的上课时段时调用，仅删除安排，不删除课程资料。'),
@@ -68,6 +68,15 @@ def get_mis_timetable(user_id):
 
 def execute(db, user_id, name, args):
     if name in {'open_mis_timetable', 'save_mis_timetable', 'cancel_mis_timetable'}:
+        from app.models.users import User
+        managed_user = db.get(User, user_id)
+        if managed_user and managed_user.school_credentials and name == 'open_mis_timetable':
+            from app.services.school_onboarding import sync_school
+            db.rollback()
+            sync_school(user_id)
+            db.expire_all()
+            managed_user = db.get(User, user_id)
+            return dict(state=managed_user.school_sync_state, message=managed_user.school_sync_message)
         from app.services.mis_timetable import mis_capture, enabled
         if not enabled() or not db.info.get('local_browser_allowed', False):
             raise HTTPException(403, '学校窗口工具仅支持已启用本地登录助手的本机请求')
@@ -108,6 +117,16 @@ def execute(db, user_id, name, args):
             snapshot = read_snapshot(user_id)
             if not snapshot:
                 raise HTTPException(404, '尚未保存学校课表，请先获取并保存')
+            if snapshot.get('courses'):
+                from app.services.school_onboarding import import_mis
+                try:
+                    count = import_mis(db, user_id, snapshot)
+                except ValueError as exc:
+                    db.rollback()
+                    raise HTTPException(422, str(exc)) from None
+                return dict(count=count, message='已从学校课程明细补充课表并跳过重复安排，无需图片识别。')
+            if not snapshot.get('image'):
+                raise HTTPException(422, '学校快照没有可用课程明细或图片')
             content = base64.b64decode(snapshot['image'])
         try:
             result = asyncio.run(timetable_service(content, db, 'image/png', user_id))
@@ -126,7 +145,7 @@ def answer(data):
         snapshot = data.get('snapshot')
         text = data.get('message') or '当前没有正在获取的学校课表。'
         if snapshot:
-            text += f" 已保存学期：{snapshot['term']}；共 {len(snapshot['courses'])} 门课程。快照需识别补充后才能用于课表查询。"
+            text += f" 已保存学期：{snapshot['term']}；共 {len(snapshot['courses'])} 门课程。可直接使用课程明细补充课表。"
         else:
             text += ' 尚未保存学校课表。'
     else:

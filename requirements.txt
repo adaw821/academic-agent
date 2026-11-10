@@ -33,6 +33,7 @@ jieba
 
 # Password hashing
 pwdlib[argon2]==0.3.0
+cryptography>=46,<48
 
 # School HTML collection
 beautifulsoup4==4.15.0

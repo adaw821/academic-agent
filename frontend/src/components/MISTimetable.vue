@@ -17,6 +17,7 @@ async function useSnapshot() {
   finally { preparing.value = false }
 }
 interface Snapshot {
+  has_image?: boolean
   term: string
   saved_at: string
   courses: { course_code: string; course_name: string; teachers: string; times: string[]; rooms: string[]; units: string; remark: string }[]
@@ -24,6 +25,15 @@ interface Snapshot {
 interface Status { state: string; message: string }
 const snapshot = ref<Snapshot | null>(null)
 const enabled = ref(false)
+const managed = ref(false)
+async function syncManaged() {
+  busy.value = true
+  try {
+    await request('/school/account/sync', { method: 'POST' })
+    status.value = { state: 'idle', message: '已请求后台同步，请到学校事务查看进度，完成后刷新课表。' }
+  } catch (e) { error.value = e instanceof Error ? e.message : '同步失败' }
+  finally { busy.value = false }
+}
 const status = ref<Status>({ state: 'idle', message: '' })
 const busy = ref(false)
 const error = ref('')
@@ -31,8 +41,8 @@ let alive = true
 let timer: ReturnType<typeof setTimeout> | undefined
 const active = () => ['opening', 'waiting', 'ready', 'saving'].includes(status.value.state)
 async function load() {
-  const data = await request<{ local_login: boolean; snapshot: Snapshot | null }>('/timetable/mis')
-  if (alive) { enabled.value = data.local_login; snapshot.value = data.snapshot }
+  const data = await request<{ local_login: boolean; managed?: boolean; snapshot: Snapshot | null }>('/timetable/mis')
+  if (alive) { enabled.value = data.local_login; managed.value = !!data.managed; snapshot.value = data.snapshot }
 }
 async function update(value: Status) {
   if (!alive) return
@@ -66,6 +76,7 @@ onUnmounted(() => { alive = false; clearTimeout(timer) })
 <template>
   <section class="feature-card">
     <div class="field-row">
+      <button v-if="managed" class="primary-button" :disabled="busy" @click="syncManaged">后台同步课表</button>
       <button v-if="enabled" class="primary-button" :disabled="busy || active()" @click="act('POST')">{{ snapshot ? '从 MIS 更新课表' : '从 MIS 保存课表' }}</button>
       <button v-if="status.state === 'ready'" class="primary-button" :disabled="busy" @click="act('PUT')">保存当前学期</button>
       <button v-if="active()" class="subtle-button" :disabled="busy" @click="act('DELETE')">取消</button>
@@ -75,8 +86,8 @@ onUnmounted(() => { alive = false; clearTimeout(timer) })
     <p v-if="error" class="form-error" role="alert">{{ error }}</p>
     <template v-if="snapshot">
       <p>{{ snapshot.term }} · 保存于 {{ localTime(snapshot.saved_at) }} · {{ snapshot.courses.length }} 门课程</p>
-      <button class="subtle-button" :disabled="preparing || recognizing || active()" @click="useSnapshot">用此图片补充课表</button>
-      <details open>
+      <button v-if="snapshot.has_image" class="subtle-button" :disabled="preparing || recognizing || active()" @click="useSnapshot">用此图片补充课表</button>
+      <details v-if="snapshot.has_image" open>
         <summary>已保存的课表图片</summary>
         <img :src="`/api/timetable/mis/image?v=${encodeURIComponent(snapshot.saved_at)}`" alt="已保存的 MIS 课表" style="width:100%;height:auto" />
       </details>

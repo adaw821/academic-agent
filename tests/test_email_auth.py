@@ -43,6 +43,17 @@ class EmailAuthTests(unittest.TestCase):
         self.factory.start()
         self.mail = patch.object(email_auth, 'send_mail')
         self.send = self.mail.start()
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        for target, value in [('app.services.school_crypto.cipher', AESGCM(os.urandom(32))),
+                              ('app.services.school_auth.authenticate', {'account': 'student', 'password': 'school-secret', 'cookie': 'session', 'storage_state': {}}),
+                              ('app.services.school_onboarding.sync_school', None)]:
+            mocker = patch(target, return_value=value)
+            mock = mocker.start()
+            self.addCleanup(mocker.stop)
+            if target.endswith('authenticate'):
+                self.authenticate = mock
+            if target.endswith('sync_school'):
+                self.sync = mock
 
     def tearDown(self):
         self.client.close()
@@ -57,7 +68,7 @@ class EmailAuthTests(unittest.TestCase):
             db.commit()
 
     def create(self):
-        return self.client.post('/user/create', json=dict(username='Alice', email='A@example.test', password='password123', code='123456'))
+        return self.client.post('/user/create', json=dict(username='Alice', email='A@example.test', password='password123', code='123456', school_account='student', school_password='school-secret'))
 
     def test_registration_requires_code_and_consumes_it(self):
         self.assertEqual(self.create().status_code, 400)
@@ -122,7 +133,7 @@ class EmailAuthTests(unittest.TestCase):
 
     def test_optional_phone_is_saved_and_supports_login(self):
         self.challenge('register')
-        payload = dict(username='Alice', email='a@example.test', password='password123', code='123456', phone=' 13800138000 ')
+        payload = dict(username='Alice', email='a@example.test', password='password123', code='123456', phone=' 13800138000 ', school_account='student', school_password='school-secret')
         result = self.client.post('/user/create', json=payload)
         self.assertEqual(result.status_code, 201)
         self.assertEqual(result.json()['phone'], '13800138000')
@@ -133,7 +144,7 @@ class EmailAuthTests(unittest.TestCase):
             db.add(User(username='Legacy', phone='13800138000', password_hash=password_hasher.hash('password123')))
             db.commit()
         self.challenge('register')
-        payload = dict(username='Alice', email='a@example.test', password='password123', code='123456', phone='not-a-phone')
+        payload = dict(username='Alice', email='a@example.test', password='password123', code='123456', phone='not-a-phone', school_account='student', school_password='school-secret')
         self.assertEqual(self.client.post('/user/create', json=payload).status_code, 422)
         payload['phone'] = '13800138000'
         self.assertEqual(self.client.post('/user/create', json=payload).status_code, 409)
@@ -160,6 +171,43 @@ class EmailAuthTests(unittest.TestCase):
             self.assertTrue(inspect(conn).has_table('users'))
             self.assertFalse(inspect(conn).has_table('email_codes'))
 
+
+    def test_school_failure_preserves_code_and_does_not_create_user(self):
+        from app.services.school_auth import SchoolAuthenticationError
+        self.challenge('register')
+        self.authenticate.side_effect = SchoolAuthenticationError('学校认证未完成')
+        self.assertEqual(self.create().status_code, 422)
+        self.sync.assert_not_called()
+        with self.sessions() as db:
+            self.assertIsNone(db.scalar(select(User)))
+            self.assertIsNotNone(db.get(EmailCode, ('a@example.test', 'register')))
+
+    def test_registration_encrypts_credentials_and_queues_only_id(self):
+        from app.services.school_crypto import unseal
+        self.challenge('register')
+        result = self.create()
+        self.assertEqual(result.status_code, 201)
+        self.assertNotIn('school-secret', result.text)
+        with self.sessions() as db:
+            user = db.scalar(select(User))
+            self.assertNotIn('school-secret', user.school_credentials)
+            self.assertEqual(unseal(user.id, user.school_credentials)['password'], 'school-secret')
+            self.sync.assert_called_once_with(user.id)
+
+    def test_missing_fields_never_echo_school_password(self):
+        for payload in ({'school_password': 'private-secret'}, {'school_account': 'student', 'school_password': 'private-secret'}):
+            result = self.client.post('/user/create', json=payload)
+            self.assertEqual(result.status_code, 422)
+            self.assertNotIn('private-secret', result.text)
+
+    def test_encryption_rejects_other_user_and_tampering(self):
+        from app.services.school_crypto import seal, unseal
+        encrypted = seal(1, {'password': 'secret'})
+        self.assertNotEqual(encrypted, seal(1, {'password': 'secret'}))
+        with self.assertRaises(ValueError):
+            unseal(2, encrypted)
+        with self.assertRaises(ValueError):
+            unseal(1, encrypted[:-8] + 'AAAAAAAA')
 
 if __name__ == '__main__':
     unittest.main()

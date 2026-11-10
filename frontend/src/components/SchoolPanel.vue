@@ -51,27 +51,27 @@ const tab = ref<'courses' | 'assignments' | 'reminders'>('courses')
 const busy = ref(false),
   loading = ref(false),
   message = ref(''),
-  session = ref(''),
+  schoolAccount = ref(''),
+  schoolPassword = ref(''),
   configured = ref<boolean | null>(null)
-const localLogin = ref(false)
 const loginPending = ref(false)
 const loginMessage = ref('')
 const connectionState = ref('')
 let loginTimer: ReturnType<typeof setTimeout> | undefined
-interface LoginStatus { state: string; message: string }
+interface LoginStatus { connected: boolean; state: string | null; message: string | null }
 function applyLoginStatus(result: LoginStatus) {
   if (!alive) return
-  loginMessage.value = result.message
-  loginPending.value = ['opening', 'waiting', 'validating'].includes(result.state)
-  if (result.state === 'connected') {
-    configured.value = true
-    connectionState.value = '已连接'
-  }
-  if (loginPending.value) loginTimer = setTimeout(() => void pollLogin(), 1500)
+  loginMessage.value = result.message || ''
+  configured.value = result.connected
+  connectionState.value = result.state === 'authentication_required' ? '需要更新学校账密' : ''
+  loginPending.value = ['queued', 'running'].includes(result.state || '')
+  clearTimeout(loginTimer)
+  if (loginPending.value) loginTimer = setTimeout(() => void pollLogin(), 3000)
 }
 async function pollLogin() {
   try {
-    applyLoginStatus(await request<LoginStatus>('/school/login'))
+    applyLoginStatus(await request<LoginStatus>('/school/account'))
+    if (!loginPending.value) await load()
   } catch (e) {
     if (!alive) return
     loginPending.value = false
@@ -79,16 +79,12 @@ async function pollLogin() {
     fail(e)
   }
 }
-function startLogin() {
+function retrySync() {
   void act(async () => {
+    await post('/school/account/sync', {})
+    loginMessage.value = '已请求同步，正在检查进度…'
     clearTimeout(loginTimer)
-    applyLoginStatus(await post<LoginStatus>('/school/login', {}))
-  })
-}
-function cancelLogin() {
-  void act(async () => {
-    clearTimeout(loginTimer)
-    applyLoginStatus(await request<LoginStatus>('/school/login', { method: 'DELETE' }))
+    loginTimer = setTimeout(() => void pollLogin(), 1500)
   })
 }
 const coursePage = ref<PageResult<SchoolCourse>>({ items: [], total: 0 }),
@@ -182,40 +178,34 @@ watch(tab, () => {
 })
 onMounted(async () => {
   void load()
-  try {
-    const result = await request<{ configured: boolean; local_login?: boolean }>('/school/session')
-    if (alive) {
-      configured.value = result.configured
-      localLogin.value = result.local_login === true
-      if (localLogin.value) await pollLogin()
-    }
-  } catch (e) {
-    fail(e)
-  }
+  await pollLogin()
 })
 function connect() {
   void act(async () => {
     try {
-      await request('/school/session', {
+      await request('/school/account', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session: session.value.trim() }),
+        body: JSON.stringify({ school_account: schoolAccount.value.trim(), school_password: schoolPassword.value }),
       })
       configured.value = true
       connectionState.value = '已连接'
       message.value = '学校连接已验证并保存。'
+      await pollLogin()
     } finally {
-      session.value = ''
+      schoolPassword.value = ''
     }
   })
 }
 function disconnect() {
   void act(async () => {
-    await request('/school/session', { method: 'DELETE' })
+    await request('/school/account', { method: 'DELETE' })
+    clearTimeout(loginTimer)
+    loginPending.value = false
     configured.value = false
     connectionState.value = ''
     loginMessage.value = ''
-    session.value = ''
+    schoolPassword.value = ''
     discovered.value = []
     discoveryDone.value = false
     message.value = '学校连接已解除，已同步数据仍保留。'
@@ -330,28 +320,18 @@ function read(item: Reminder) {
           connectionState || (configured === null ? '正在检查' : configured ? '已保存连接' : '未连接')
         }}
       </summary>
-      <p>登录学校账号后即可同步课程和作业，已同步的数据会保留。</p>
+      <p>学校凭据已加密保存，用于后台同步。删除连接会清除凭据与会话，已导入数据保留。</p>
       <div class="field-row">
-        <button v-if="localLogin" class="primary-button" :disabled="busy || loginPending" @click="startLogin">
-          {{ loginPending ? '等待学校登录…' : configured ? '重新连接学校' : '连接学校' }}
-        </button>
-        <button v-if="loginPending" class="subtle-button" :disabled="busy" @click="cancelLogin">取消连接</button>
-        <button v-if="configured" class="subtle-button" :disabled="busy || loginPending" @click="disconnect">解除连接</button>
+        <button v-if="configured" class="primary-button" :disabled="busy" @click="retrySync">同步课程和课表 / 重试</button>
+        <button v-if="configured" class="subtle-button" :disabled="busy" @click="disconnect">删除学校连接</button>
       </div>
       <p v-if="loginMessage" role="status">{{ loginMessage }}</p>
       <details>
-        <summary>手动连接{{ localLogin ? '（备用方式）' : '' }}</summary>
-        <p>在学校网站登录后，从浏览器开发者工具的 Application → Cookies 中复制 MoodleSession 的 Value。此处不收集学校密码。</p>
+        <summary>更新学校账密</summary>
       <form class="field-row" @submit.prevent="connect">
-        <label
-          >学校会话<input
-            v-model="session"
-            type="password"
-            autocomplete="off"
-            maxlength="512"
-            required
-        /></label>
-        <button class="primary-button" :disabled="busy || loginPending || !session.trim()">验证并保存连接</button>
+        <label>学生账号<input v-model="schoolAccount" autocomplete="off" maxlength="128" required /></label>
+        <label>学校密码<input v-model="schoolPassword" type="password" autocomplete="off" maxlength="256" required /></label>
+        <button class="primary-button" :disabled="busy">验证并更新连接</button>
       </form>
       </details>
     </details>

@@ -12,7 +12,7 @@ def session_path(user_id: int) -> Path:
     return root / f'{int(user_id)}.json'
 
 
-def save_school_session(user_id: int, value: str):
+def save_school_session(user_id: int, value: str, *, encrypted=False):
     if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,512}', value):
         raise ValueError('invalid session')
     path = session_path(user_id)
@@ -22,7 +22,11 @@ def save_school_session(user_id: int, value: str):
         # Owner-only mode on POSIX; Windows inherits the server account directory ACL.
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
-            json.dump({'MoodleSession': value}, output)
+            if encrypted:
+                from app.services.school_crypto import seal
+                json.dump({'encrypted': seal(user_id, {'MoodleSession': value})}, output)
+            else:
+                json.dump({'MoodleSession': value}, output)
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -35,6 +39,9 @@ def remove_school_session(user_id: int):
 def load_school_session(user_id: int) -> str:
     try:
         data = json.loads(session_path(user_id).read_text(encoding='utf-8-sig'))
+        if isinstance(data, dict) and 'encrypted' in data:
+            from app.services.school_onboarding import ensure_session
+            return ensure_session(user_id)
         value = data.get('MoodleSession') if isinstance(data, dict) else None
         if not isinstance(value, str) or not value.strip() or re.search(r'[\s;]', value.strip()):
             raise ValueError('invalid session')

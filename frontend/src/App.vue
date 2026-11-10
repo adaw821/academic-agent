@@ -263,6 +263,8 @@ const account = ref('')
 const password = ref('')
 const emailCode = ref('')
 const confirmPassword = ref('')
+const schoolAccount = ref('')
+const schoolPassword = ref('')
 const codeBusy = ref(false)
 const codeNotice = ref('')
 const codeSentAt = ref(0)
@@ -374,6 +376,7 @@ const markdown = (text: string) =>
 function openModal(value: typeof modal.value) {
   if (codeBusy.value) return
   password.value = ''
+  schoolPassword.value = ''
   emailCode.value = ''
   confirmPassword.value = ''
   codeNotice.value = ''
@@ -386,6 +389,7 @@ watch(modal, async (value) => {
   if (!value) {
     dialog.value?.close()
     password.value = ''
+    schoolPassword.value = ''
     projectToDelete.value = null
     modalError.value = ''
   }
@@ -796,8 +800,10 @@ async function authenticate() {
         password: password.value,
         email: account.value.trim(),
         code: emailCode.value,
+        school_account: schoolAccount.value.trim(),
+        school_password: schoolPassword.value,
       })
-      notice.value = '注册成功，请使用刚才的账号登录。'
+      notice.value = '注册成功，学校数据正在同步。登录后可在学校事务查看进度。'
       openModal('login')
       password.value = ''
       return
@@ -1508,7 +1514,6 @@ onUnmounted(() => {
  
       <div v-if="view === 'research'" class="research-layout">
         <main class="research-main">
-          <div v-if="!activeId" class="welcome-full-bg"></div>
           <div class="research-toolbar" :class="{ 'toolbar-slim': !activeId }">
             <div>
               <h1>{{ activeProject?.name || '研究工作台' }}</h1>
@@ -2278,9 +2283,9 @@ onUnmounted(() => {
  
           <label>
             {{ modal === 'login' ? '邮箱或手机号' : '邮箱' }}
-            <div v-if="modal === 'register'" class="email-field-wrap">
+            <div v-if="modal !== 'login'" class="email-field-wrap">
               <input
-                type="email" v-model="account" required maxlength="255" autocomplete="username"
+                type="email" aria-label="邮箱" v-model="account" required maxlength="255" autocomplete="username"
                 placeholder="your@email.com"
                 :class="{ 'email-valid': account && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(account) }"
               />
@@ -2298,9 +2303,9 @@ onUnmounted(() => {
             />
           </label>
  
-          <label v-if="modal === 'register'">
+          <label v-if="modal !== 'login'">
             邮箱验证码
-            <input v-model="emailCode" required inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="6 位验证码" />
+            <input aria-label="邮箱验证码" v-model="emailCode" required inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="6 位验证码" />
             <p v-if="codeNotice" role="status" class="code-notice">{{ codeNotice }}</p>
           </label>
  
@@ -2318,7 +2323,7 @@ onUnmounted(() => {
           </label>
  
           <label v-if="modal === 'reset'">
-            新密码
+            确认密码
             <input v-model="confirmPassword" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="至少 8 位" />
           </label>
  
@@ -2326,12 +2331,18 @@ onUnmounted(() => {
             手机号（选填）
             <input v-model="phone" type="tel" autocomplete="tel" maxlength="16" pattern="[+]?[0-9]{7,15}" placeholder="可留空，如 13800138000" />
           </label>
+
+          <template v-if="modal === 'register'">
+            <label>学生账号<input v-model="schoolAccount" required maxlength="128" autocomplete="off" placeholder="学校统一认证账号" /></label>
+            <label>学校密码<input v-model="schoolPassword" type="password" required maxlength="256" autocomplete="off" placeholder="与上面的应用密码分开" /></label>
+            <p class="code-notice">注册时验证学校账号，并加密保存学校凭据，用于自动同步课程、作业和课表。可在学校事务中更新或删除连接。</p>
+          </template>
  
           <p v-if="modalError" class="form-error" role="alert">{{ modalError }}</p>
  
           <button class="primary-button full-width" :disabled="modalBusy">
             <LoaderCircle v-if="modalBusy" class="spin" :size="16" />
-            {{ modalBusy ? '请稍候…' : modal === 'login' ? '登录' : modal === 'reset' ? '重置密码' : '创建账号' }}
+            {{ modalBusy ? (modal === 'register' ? '正在验证学校连接…' : '请稍候…') : modal === 'login' ? '登录' : modal === 'reset' ? '重置密码' : '创建账号' }}
             <ArrowRight v-if="!modalBusy" :size="16" />
           </button>
         </form>

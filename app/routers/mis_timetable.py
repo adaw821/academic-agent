@@ -11,13 +11,14 @@ router = APIRouter(tags=['MIS timetable'])
 @router.get('/timetable/mis')
 def saved_timetable(user: User = Depends(get_currentUser)):
     snapshot = read_snapshot(user.id)
-    return {'local_login': enabled(), 'snapshot': {k: v for k, v in snapshot.items() if k != 'image'} if snapshot else None}
+    return {'local_login': enabled() and not bool(user.school_credentials), 'managed': bool(user.school_credentials),
+            'snapshot': dict({k: v for k, v in snapshot.items() if k != 'image'}, has_image=bool(snapshot.get('image'))) if snapshot else None}
 
 
 @router.get('/timetable/mis/image')
 def saved_image(user: User = Depends(get_currentUser)):
     snapshot = read_snapshot(user.id)
-    if not snapshot:
+    if not snapshot or not snapshot.get('image'):
         raise HTTPException(404, '尚未保存 MIS 课表')
     return Response(base64.b64decode(snapshot['image']), media_type='image/png', headers={'Cache-Control': 'no-store'})
 

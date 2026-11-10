@@ -81,12 +81,32 @@ def reset_password(body: PasswordReset, response: Response, background: Backgrou
 
 """注册"""
 @router.post("/user/create", status_code=201)
-def user_create(user: UserCreate, db: Session  = Depends(get_db)):
+def user_create(user: UserCreate, background: BackgroundTasks, request: Request, db: Session = Depends(get_db)):
+    from app.services.school_crypto import cipher, seal
+    from app.services.school_auth import authenticate, SchoolAuthenticationError, SchoolConnectionError
+    from app.services.school_onboarding import sync_school
+    try:
+        cipher()
+    except ValueError as exc:
+        raise HTTPException(503, str(exc)) from None
+    rate_limit(db, 'school-register-ip:' + (request.client.host if request.client else 'unknown'), 600, 10)
+    rate_limit(db, 'school-account:' + user.school_account.casefold(), 600, 5)
+    db.commit()
     verify_code(db, user.email, 'register', user.code)
     if db.scalar(select(User.id).where(func.lower(User.email) == user.email)):
         raise HTTPException(409, '该邮箱已注册，请登录或找回密码')
     if user.phone and db.scalar(select(User.id).where(User.phone == user.phone)):
         raise HTTPException(409, '该手机号已被使用，请更换或留空')
+
+    # Release email-code lock during slow external authentication; consume again at commit.
+    db.rollback()
+    try:
+        school = authenticate(user.school_account, user.school_password.get_secret_value())
+    except SchoolAuthenticationError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except SchoolConnectionError as exc:
+        raise HTTPException(503, str(exc)) from None
+    verify_code(db, user.email, 'register', user.code)
 
     hashed_password = password_hasher.hash(user.password)
 
@@ -99,6 +119,10 @@ def user_create(user: UserCreate, db: Session  = Depends(get_db)):
 
     db.add(new_user)
     try:
+        db.flush()
+        new_user.school_credentials = seal(new_user.id, school)
+        new_user.school_sync_state = 'queued'
+        new_user.school_sync_message = '学校连接已验证，等待同步课程和课表。'
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -107,6 +131,7 @@ def user_create(user: UserCreate, db: Session  = Depends(get_db)):
             detail="注册信息冲突，请检查邮箱或手机号",
         )
     db.refresh(new_user)
+    background.add_task(sync_school, new_user.id)
 
     return {
         "id": new_user.id,
