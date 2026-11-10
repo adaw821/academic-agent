@@ -7,6 +7,7 @@ from pathlib import Path
 from docling.datamodel.base_models import ConversionStatus, DocumentStream, InputFormat
 from docling.datamodel.pipeline_options import ConvertPipelineOptions, PdfPipelineOptions, RapidOcrOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption, PowerpointFormatOption
+from docling.datamodel.settings import settings as docling_settings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 from sqlalchemy.orm import Session
@@ -36,6 +37,11 @@ def get_embedding_model():
         (perf_counter() - started_at) * 1000,
     )
     return model
+
+
+# docling 默认对版面/图片分类模型做 torch.compile；Windows 没有可用的 Triton，
+# 首个批次就会抛 TritonMissing。必须在构造 pipeline options 之前关闭（默认值在构造时读取）。
+docling_settings.inference.compile_torch_models = False
 
 
 @lru_cache(maxsize=1)
