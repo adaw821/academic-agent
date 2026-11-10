@@ -95,8 +95,10 @@ class SchoolCourseQATests(unittest.TestCase):
 
     def test_alias_matching_uses_owned_candidates(self):
         self.course_plan(course_name='dbms')
+        # 三次规划器调用：route 选 query_courses、工具内别名匹配、school_agent 续写（这里判定已可回答，收尾）。
         self.planner.invoke.side_effect = [self.planner.invoke.return_value, AIMessage(content='', tool_calls=[
-            {'name': 'resolve_course_candidates', 'args': {'indices': [0], 'confident': True}, 'id': 'match1'}])]
+            {'name': 'resolve_course_candidates', 'args': {'indices': [0], 'confident': True}, 'id': 'match1'}]),
+            AIMessage(content='已找到匹配课程。')]
         data = self.ask(query='dbms 里有什么').json()['tool_results'][0]
         self.assertEqual([r['id'] for r in data['items']], [1])
 

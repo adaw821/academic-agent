@@ -123,7 +123,8 @@ class SchoolTimetableQATests(unittest.TestCase):
         self.clock.now.return_value = datetime(2026, 10, 26, 12, tzinfo=fixture.school_qa.CHINA)
         self.assertEqual(self.client.post(f"/api/projects/1/jobs/{job['job_id']}/retry").status_code, 202)
         durable.run_workflow(job['job_id'])
-        self.planner.invoke.assert_called_once()
+        # 工具循环：route 选首个只读工具一次 + school_agent 续写一次（重复查询被去重阻断）；重试复用缓存不再调用。
+        self.assertEqual(self.planner.invoke.call_count, 2)
         result = self.client.get(f"/api/projects/1/jobs/{job['job_id']}").json()
         self.assertEqual(result['status'], 'completed')
         self.assertEqual(result['result']['tool_results'][0]['matched_date'], '2026-10-26')

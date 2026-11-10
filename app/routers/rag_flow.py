@@ -489,7 +489,7 @@ def _build_qa_graph(project_id, request, db, user, *, checkpoints=None, local_br
         if request.confirm_action is not None:
             performance_logger.info("event=qa_route route=confirm_action tool=%s",
                                     request.confirm_action.name)
-            return {"route": "tool", "confirmed": True, "assignment_tool": {
+            return {"route": "tool_confirmed", "confirmed": True, "assignment_tool": {
                 "name": request.confirm_action.name, "id": "confirm-action",
                 "args": request.confirm_action.args,
             }}
@@ -616,8 +616,18 @@ def _build_qa_graph(project_id, request, db, user, *, checkpoints=None, local_br
         "route": route, "overview_retrieve": overview_retrieve,
     }
     if request.doc_ids is None and request.document_id is None:
-        from app.services.school_qa import plan_assignment_query, query_assignments, answer_assignments
+        from app.services.school_qa import (plan_assignment_query, query_assignments,
+                                            answer_assignments, run_school_agent)
 
+        # 新一轮学校任务（route="tool"）：跑有界只读工具循环。
+        def school_agent(state):
+            return {"result": run_school_agent(
+                db, user.id, request.query, state["history"], state["summary"],
+                state["assignment_tool"], project_id=project_id,
+                has_timetable_image=bool(request.timetable_image_id),
+            )}
+
+        # 确认-续跑（route="tool_confirmed"）：单发执行已确认的写操作，不进循环。
         def assignment_query(state):
             return {"assignment_data": query_assignments(db, user.id, state["assignment_tool"], project_id=project_id,
                                                         confirmed=state.get("confirmed", False))}
@@ -625,7 +635,8 @@ def _build_qa_graph(project_id, request, db, user, *, checkpoints=None, local_br
         def assignment_answer(state):
             return {"result": answer_assignments(request.query, state["assignment_tool"], state["assignment_data"])}
 
-        nodes.update(assignment_query=assignment_query, assignment_answer=assignment_answer)
+        nodes.update(school_agent=school_agent, assignment_query=assignment_query,
+                     assignment_answer=assignment_answer)
     if checkpoints is not None:
         nodes = checkpoints.wrap(nodes, uncached={"validate", "save"})
     return build_qa_graph(nodes)

@@ -55,13 +55,17 @@ def build_qa_graph(nodes):
     graph.add_edge("history", "route")
     route_targets = {"overview": "overview_retrieve", "continue": "rewrite",
                      "whole_doc": "answer", "direct": "answer", "clarify": "save"}
+    if "school_agent" in nodes:
+        route_targets["tool"] = "school_agent"                 # 新一轮学校任务 → 只读工具循环
     if "assignment_query" in nodes:
-        route_targets["tool"] = "assignment_query"
+        route_targets["tool_confirmed"] = "assignment_query"   # 确认-续跑 → 单发写操作
     graph.add_conditional_edges("route", lambda state: state["route"], route_targets)
     graph.add_edge("rewrite", "translate")
     graph.add_conditional_edges("overview_retrieve", lambda state: (
         "save" if state["overview_plan"].get("clarification") else "answer"
     ), ["save", "answer"])
+    if "school_agent" in nodes:
+        graph.add_edge("school_agent", "save")
     if "assignment_query" in nodes:
         graph.add_edge("assignment_query", "assignment_answer")
         graph.add_edge("assignment_answer", "save")
