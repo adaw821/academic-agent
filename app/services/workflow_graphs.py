@@ -65,10 +65,12 @@ def build_qa_graph(nodes):
         "save" if state["overview_plan"].get("clarification") else "answer"
     ), ["save", "answer"])
     if "school_agent" in nodes:
-        graph.add_edge("school_agent", "save")
+        graph.add_edge("school_agent", "school_followup" if "school_followup" in nodes else "save")
     if "assignment_query" in nodes:
         graph.add_edge("assignment_query", "assignment_answer")
-        graph.add_edge("assignment_answer", "save")
+        graph.add_edge("assignment_answer", "school_followup" if "school_followup" in nodes else "save")
+    if "school_followup" in nodes:
+        graph.add_edge("school_followup", "save")
     graph.add_conditional_edges("translate", lambda state: (
         "selection_retrieve" if state.get("selection") is not None else "retrieve_original"
     ), ["selection_retrieve", "retrieve_original"])

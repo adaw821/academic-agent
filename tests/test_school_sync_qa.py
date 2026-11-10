@@ -91,7 +91,7 @@ class SchoolSyncQATests(unittest.TestCase):
     def test_sync_tool_always_exposed_and_executes_without_a_flag(self):
         response = self.ask()
         self.assertEqual(response.status_code, 200, response.text)
-        schemas = self.llm.bind_tools.call_args.args[0]
+        schemas = self.llm.bind_tools.call_args_list[0].args[0]  # Initial planner; follow-up is read-only.
         self.assertIn('sync_school_course', [s['function']['name'] for s in schemas])
         self.collect.assert_called_once_with(URL)
 
@@ -393,7 +393,7 @@ class SchoolSyncQATests(unittest.TestCase):
         self.assertEqual(result['status'], 'completed', result)
         self.assertEqual(result['result']['tool_results'][0]['status'], 'completed')
         self.collect.assert_called_once()
-        self.planner.invoke.assert_called_once()
+        self.assertEqual(self.planner.invoke.call_count, 2)  # Initial plan plus read-only follow-up decision.
         with self.sessions() as db:
             self.assertEqual(db.scalar(select(func.count()).select_from(Message)), 4)
 
