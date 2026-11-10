@@ -20,6 +20,10 @@ chunk_stub.get_embedding_model = Mock(side_effect=AssertionError("No model calls
 answer_stub = types.ModuleType("app.services.answer_services")
 answer_stub.generate_answer = Mock(return_value={"answer": "test", "sources": []})
 answer_stub.get_history_messages = Mock(return_value=([], "", None))
+answer_stub._owns_conversation = lambda conversation, project_id, user_id: (
+    conversation.project_id == project_id if project_id is not None
+    else conversation.project_id is None and conversation.user_id == user_id
+)
 answer_stub.llm = Mock()
 answer_stub.CONTEXT_LIMIT = 32_768
 answer_stub.RESERVED_OUTPUT_TOKENS = 8_192

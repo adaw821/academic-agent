@@ -91,8 +91,10 @@ def generate_answer(
         summary_boundary: int | None = None,
         selection: dict | None = None,
         overview: bool = False,
+        direct: bool = False,
 ):
-    if not final_chunks and selection is None:
+    # direct：路由判定无需查资料，凭模型自身知识直接回答，不走空资料短路。
+    if not final_chunks and selection is None and not direct:
         return {
             "answer": "没有检索到任何有用资料",
             "retrieved_contexts": [],
@@ -145,6 +147,20 @@ def generate_answer(
             "选区未经原文位置核验，不编造页码或宣称已核对原文。"
         )
 
+    if direct:
+        system_prompt = (
+            "你是一个学习与科研助手，直接根据你自己的知识回答用户问题。\n"
+            "\n"
+            "回答规则：\n"
+            "1. 语言：用户明确指定回答语言时遵循；否则使用用户问题的主要语言。\n"
+            "2. 本轮没有检索任何用户上传的资料，请凭自身知识作答，不要假装引用了资料，"
+            "也不要标注资料编号。\n"
+            "3. 简洁性：先直接回答，只补充理解答案所必需的信息；用户要求详细时再展开。\n"
+            "4. 诚实：不确定或涉及可能过时、易混淆的事实时，明确说明不确定，不编造。"
+            "若问题确实需要查阅用户的具体资料/文档才能回答，提示用户到对应项目里提问。\n"
+            "5. 历史：结合历史对话理解用户意图，逐项回应其要求。"
+        )
+
     #用来存放整理好的回答资料
     context_parts = []
     if selection is not None:
@@ -180,11 +196,17 @@ def generate_answer(
 
     history_context = "\n\n".join(history_strings)
 
-    user_prompt = (
-        f"用户问题：\n{query}\n\n"
-        f"本轮参考资料：\n{recent_context}\n\n"
-        f"历史对话: \n{history_context}"
-    )
+    if direct:
+        user_prompt = (
+            f"用户问题：\n{query}\n\n"
+            f"历史对话: \n{history_context}"
+        )
+    else:
+        user_prompt = (
+            f"用户问题：\n{query}\n\n"
+            f"本轮参考资料：\n{recent_context}\n\n"
+            f"历史对话: \n{history_context}"
+        )
     if summary:
         user_prompt += f"\n\n过去历史对话总结: \n{summary}"
 
@@ -332,17 +354,25 @@ def generate_answer(
     }
 
 @timed_stage("qa.history_load")
+def _owns_conversation(conversation, project_id: int | None, user_id: int | None) -> bool:
+    """会话归属校验：项目对话看 project_id；无项目的默认对话看 user_id。"""
+    if project_id is not None:
+        return conversation.project_id == project_id
+    return conversation.project_id is None and conversation.user_id == user_id
+
+
 def get_history_messages(
     conversation_id: int | None,
     db: Session,
-    project_id: int
+    project_id: int | None,
+    user_id: int | None = None,
 ) -> tuple[list[dict], str, int | None]:
     """读取尚未被摘要覆盖的消息及已有摘要。"""
     if conversation_id is None:
         return [], "", None
 
     conversation = db.get(Conversation, conversation_id)
-    if not conversation or conversation.project_id != project_id:
+    if not conversation or not _owns_conversation(conversation, project_id, user_id):
         raise HTTPException(
             status_code=404,
             detail="没查到有效聊天记录"

@@ -9,7 +9,7 @@ from app.models.documents import Document
 
 from app.models.conversation import Conversation
 from app.models.message import Message
-from app.services.answer_services import llm
+from app.services.answer_services import llm, _owns_conversation
 from app.services.context_management import count_message_tokens, is_over_budget
 from fastapi import HTTPException
 from uuid import uuid4
@@ -485,8 +485,8 @@ def history_messages_control(
     query: str,
     conversation_id: int | None,
     db: Session,
-    project_id: int,
-    *, response_data: dict | None = None, commit: bool = True,
+    project_id: int | None,
+    *, response_data: dict | None = None, commit: bool = True, user_id: int | None = None,
 ):
 
     #用来标识某个问题和回答是同一轮
@@ -499,7 +499,7 @@ def history_messages_control(
                 title = selected["query"]
         except (ValueError, TypeError):
             pass
-        conversation = Conversation(project_id=project_id, title=title[:100])
+        conversation = Conversation(project_id=project_id, user_id=user_id, title=title[:100])
         db.add(conversation)
         db.flush()
 
@@ -524,7 +524,7 @@ def history_messages_control(
 
     else:
         conversation = db.get(Conversation, conversation_id)
-        if not conversation or conversation.project_id != project_id:
+        if not conversation or not _owns_conversation(conversation, project_id, user_id):
             raise HTTPException(status_code=404, detail="会话不存在")
 
         question = Message(

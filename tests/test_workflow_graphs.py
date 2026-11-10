@@ -4,11 +4,12 @@ from app.services.workflow_graphs import build_document_graph, build_qa_graph
 
 
 class WorkflowGraphTests(unittest.TestCase):
-    def qa(self, *, translated="en", selection=None, fail=None):
+    def qa(self, *, translated="en", selection=None, fail=None, route="continue"):
         calls = []
         updates = {
             "validate": {"selection": selection}, "translate": {"translated_query": translated},
-            "answer": {"result": {"answer": "ok"}}, "save": {"result": {"answer": "ok", "conversation_id": 1}},
+            "route": {"route": route}, "answer": {"result": {"answer": "ok"}},
+            "save": {"result": {"answer": "ok", "conversation_id": 1}},
         }
         def node(name):
             def run(state):
@@ -17,8 +18,9 @@ class WorkflowGraphTests(unittest.TestCase):
                     raise ValueError("failed")
                 return updates.get(name, {})
             return run
-        names = ["validate", "history", "rewrite", "translate", "retrieve_original",
-                 "retrieve_translated", "rerank", "selection_retrieve", "answer", "save"]
+        names = ["validate", "history", "route", "rewrite", "translate", "retrieve_original",
+                 "retrieve_translated", "rerank", "selection_retrieve", "overview_retrieve",
+                 "answer", "save"]
         return build_qa_graph({name: node(name) for name in names}), calls
 
     def test_bilingual_and_translation_fallback(self):
@@ -35,6 +37,12 @@ class WorkflowGraphTests(unittest.TestCase):
         graph.invoke({})
         self.assertIn("selection_retrieve", calls)
         self.assertNotIn("retrieve_original", calls)
+
+    def test_direct_route_skips_retrieval(self):
+        graph, calls = self.qa(route="direct")
+        graph.invoke({})
+        # 直接答:route 后直奔 answer,不经 rewrite/translate/检索/rerank。
+        self.assertEqual(calls, ["validate", "history", "route", "answer", "save"])
 
     def test_failure_never_saves_or_retries(self):
         for failure in ("validate", "rerank", "answer", "save"):

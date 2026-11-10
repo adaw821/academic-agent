@@ -78,7 +78,7 @@ def invoke(bound, messages):
     return response
 
 
-def plan_assignment_query(query, history, summary, *, allow_school_sync=False, allow_school_actions=False, has_timetable_image=False):
+def plan_assignment_query(query, history, summary, *, has_timetable_image=False):
     today = datetime.now(CHINA).date()
     schemas = [{'type': 'function', 'function': {
         'name': TOOL_NAME,
@@ -113,18 +113,16 @@ def plan_assignment_query(query, history, summary, *, allow_school_sync=False, a
     schemas.extend({'type': 'function', 'function': {'name': name, 'description': description,
                     'parameters': schema.model_json_schema()}}
                    for name, (schema, description) in timetable_actions.READ_SCHEMAS.items())
-    if allow_school_sync:
-        schemas.append({'type': 'function', 'function': {
-            'name': SYNC_TOOL_NAME,
-            'description': '用户明确要求同步或首次导入单门学校课程时执行。先匹配本地课程；名称未找到时自动发现学校课程并在唯一匹配后导入。歧义时返回候选。不下载附件、不导入知识库、不提交作业。',
-            'parameters': CourseSyncQuery.model_json_schema(),
-        }})
-    if allow_school_actions:
-        schemas.extend({'type': 'function', 'function': {'name': name, 'description': description,
-                        'parameters': schema.model_json_schema()}}
-                       for name, (schema, description) in ACTION_SCHEMAS.items())
+    schemas.append({'type': 'function', 'function': {
+        'name': SYNC_TOOL_NAME,
+        'description': '用户明确要求同步或首次导入单门学校课程时执行。先匹配本地课程；名称未找到时自动发现学校课程并在唯一匹配后导入。歧义时返回候选。不下载附件、不导入知识库、不提交作业。',
+        'parameters': CourseSyncQuery.model_json_schema(),
+    }})
+    schemas.extend({'type': 'function', 'function': {'name': name, 'description': description,
+                    'parameters': schema.model_json_schema()}}
+                   for name, (schema, description) in ACTION_SCHEMAS.items())
     messages = [SystemMessage(content=(
-        ('本轮开放附件下载、导入当前项目、提醒已读、学校课表获取、图片补充与课表增删改。仅在本轮明确要求操作时执行；只使用用户提供或此前工具返回的本地 ID，不猜测 ID。缺少 ID 时先查询对应数据。' if allow_school_actions else '') +
+        '附件下载、导入当前项目、提醒已读、学校课表获取、图片补充、课表增删改与同步课程均可调用；写操作会先向用户出示确认卡片、用户点确认后才真正执行，所以本轮按用户意图正常选择工具即可，不必要求用户预先授权。只使用用户提供或此前工具返回的本地 ID，不猜测 ID；缺少 ID 时先查询对应数据。' +
         ('本轮附有一张课表图片。用户要求识别补充时使用 supplement_timetable_image(source="attachment")。' if has_timetable_image else '本轮没有附加课表图片，不得声称看到图片；需要用户在聊天框附加图片。') +
         f'你根据本轮意图、近期对话和工具说明自主选择最合适的一个工具，不依赖固定关键词或要求用户使用特定句式。今天是北京时间 {today.isoformat()}。'
         '先区分查看状态、执行操作、解释知识。询问现状不能当作同步、下载或导入的授权。'
@@ -158,8 +156,7 @@ def plan_assignment_query(query, history, summary, *, allow_school_sync=False, a
            '用户粘贴“Database Management Systems（学校课程编号：11405）这个”也属于选择上一轮待同步候选。'
            '学校编号绝不能放入本地 course_id，也不能从名称中的数字猜测编号。'
            '名称或缩写必须保留用户原文传入 course_name，例如 dbms；由后续匹配器结合实际课程列表理解数据库等别名，不在此处编造正式名称。'
-           '学校候选必须来自工具实际结果，不编造名称、编号或 URL；目标不明确则留空请求澄清。'
-           if allow_school_sync else '')
+           '学校候选必须来自工具实际结果，不编造名称、编号或 URL；目标不明确则留空请求澄清。')
     )), HumanMessage(content=json.dumps({
         'query': query, 'recent_history': [{'role': h['role'], 'content': h['content'][:1000]} for h in history[-6:]],
         'summary': summary[-2000:],
@@ -169,7 +166,10 @@ def plan_assignment_query(query, history, summary, *, allow_school_sync=False, a
     if not calls:
         return None  # 模型判定不是学校任务 → 交回检索
     if response.invalid_tool_calls or len(calls) != 1:
-        raise HTTPException(502, '模型未返回有效的单个学校工具调用')
+        # 规划器偶发抽风（多调用/无效调用）不再对用户抛 502，静默退回普通检索。
+        performance_logger.info("event=assignment_planner_fallback calls=%s invalid=%s",
+                                len(calls), bool(response.invalid_tool_calls))
+        return None
     call = calls[0]
     # 诊断用：规划器每次把问题路由到哪个工具；use_document_qa 表示交回检索。
     performance_logger.info(
@@ -181,10 +181,8 @@ def plan_assignment_query(query, history, summary, *, allow_school_sync=False, a
                      COURSES_TOOL_NAME: CourseQuery, CLARIFY_TOOL_NAME: SchoolClarification,
                      DOCUMENT_TOOL_NAME: DocumentRoute}
     query_schemas.update({name: value[0] for name, value in timetable_actions.READ_SCHEMAS.items()})
-    if allow_school_sync:
-        query_schemas[SYNC_TOOL_NAME] = CourseSyncQuery
-    if allow_school_actions:
-        query_schemas.update({name: value[0] for name, value in ACTION_SCHEMAS.items()})
+    query_schemas[SYNC_TOOL_NAME] = CourseSyncQuery
+    query_schemas.update({name: value[0] for name, value in ACTION_SCHEMAS.items()})
     if call['name'] not in query_schemas:
         raise HTTPException(502, '模型请求了未开放的学校工具')
     try:
@@ -221,7 +219,44 @@ def plan_assignment_query(query, history, summary, *, allow_school_sync=False, a
             'args': args.model_dump(mode='json', exclude_unset=call['name'] == 'update_course_details')}
 
 
-def query_assignments(db, user_id, plan, *, project_id=None, allow_school_sync=False, allow_school_actions=False):
+# 本轮附件绑定 / 浏览器引导流程的动作直接执行（确认回传不带 timetable_image_id，
+# 且 MIS 抓取本就是用户在操作窗口），与同步一样不进确认门。
+DIRECT_ACTIONS = {'open_mis_timetable', 'save_mis_timetable', 'cancel_mis_timetable',
+                  'supplement_timetable_image'}
+# 需要用户点「确认执行」才落地的、以本地 ID 定位的静默数据写操作。
+WRITE_TOOLS = set(ACTION_SCHEMAS) - DIRECT_ACTIONS
+
+
+def describe_action(name, args):
+    """一句人话复述将要执行的写操作，用于确认卡片。"""
+    a = args or {}
+    target = a.get('course_name') or ''
+    phrase = {
+        'download_school_resource': '下载该教学附件到服务器缓存',
+        'import_school_resource': '把该附件导入当前知识库项目',
+        'mark_school_reminder_read': '把该提醒标记为已读',
+        'open_mis_timetable': '打开学校 MIS 窗口以获取课表（需你自行登录并选择学期）',
+        'save_mis_timetable': '保存当前学校窗口里的课表快照',
+        'cancel_mis_timetable': '取消本次学校课表获取',
+        'supplement_timetable_image': '识别图片并补充到可查询课表',
+        'add_timetable_entry': f'新增上课安排{("：" + target) if target else ""}',
+        'update_timetable_entry': '修改该上课安排的时间或地点',
+        'delete_timetable_entry': '删除该上课安排',
+        'set_timetable_calendar': '设置该安排的学期日期与单双周规则',
+        'update_course_details': '修改该课程的名称/编号/教师（影响其全部上课时段）',
+    }.get(name, '执行该学校操作')
+    return f'我将要{phrase}。确认执行吗？'
+
+
+def _confirm_required(plan):
+    return dict(tool=plan['name'], status='confirm_required',
+                pending_action={'name': plan['name'], 'args': plan['args']},
+                description=describe_action(plan['name'], plan['args']))
+
+
+def query_assignments(db, user_id, plan, *, project_id=None, confirmed=False):
+    if confirmed and plan['name'] not in WRITE_TOOLS:
+        raise HTTPException(400, '该操作不支持直接确认执行')
     if plan['name'] == 'get_mis_timetable':
         timetable_actions.EmptyArgs.model_validate(plan['args'])
         return timetable_actions.get_mis_timetable(user_id)
@@ -232,12 +267,15 @@ def query_assignments(db, user_id, plan, *, project_id=None, allow_school_sync=F
         return dict(query_courses(db, user_id, plan['args']), tool=COURSES_TOOL_NAME,
                     filters=plan['args'], queried_at=datetime.now(CHINA).isoformat())
     if plan['name'] in ACTION_SCHEMAS:
-        if not allow_school_actions:
-            raise HTTPException(403, '本轮未允许学校操作')
+        if plan['name'] in WRITE_TOOLS and not confirmed:
+            return _confirm_required(plan)
+        if confirmed:
+            try:
+                ACTION_SCHEMAS[plan['name']][0].model_validate(plan['args'])  # 确认回传的参数重新校验
+            except ValidationError:
+                raise HTTPException(400, '确认执行的操作参数无效') from None
         return execute_action(db, user_id, project_id, plan)
     if plan['name'] == SYNC_TOOL_NAME:
-        if not allow_school_sync:
-            raise HTTPException(403, '本轮未允许学校同步')
         return sync_school_course(db, user_id, plan['args'])
     if plan['name'] == TIMETABLE_TOOL_NAME:
         return dict(query_timetable(db, user_id, plan['args']), tool=TIMETABLE_TOOL_NAME,
@@ -286,6 +324,10 @@ def query_assignments(db, user_id, plan, *, project_id=None, allow_school_sync=F
 
 
 def answer_assignments(query, plan, data):
+    # 写操作首轮：不执行，直接把确认卡片交给前端（含 pending_action）。
+    if data.get('status') == 'confirm_required':
+        return dict(answer=data['description'], pending_action=data['pending_action'],
+                    sources=[], retrieved_contexts=[], tool_results=[data])
     if plan['name'] in timetable_actions.READ_SCHEMAS:
         return timetable_actions.answer(data)
     if plan['name'] == CLARIFY_TOOL_NAME:

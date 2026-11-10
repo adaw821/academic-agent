@@ -273,6 +273,10 @@ textarea {
 .project-item-wrap .project-item {
   margin-bottom: 4px;
 }
+/* 无项目的默认对话入口：和项目列表之间留一点间距 */
+.default-chat-wrap {
+  margin: 4px 0 10px;
+}
 .project-delete {
   position: absolute;
   right: 4px;
@@ -1571,6 +1575,29 @@ textarea {
 }
 .markdown img {
   max-width: 100%;
+}
+.confirm-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+.confirm-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  border-radius: 7px;
+  background: #2d4db5;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.confirm-btn:hover {
+  background: #243f98;
 }
 .source-chips {
   display: flex;

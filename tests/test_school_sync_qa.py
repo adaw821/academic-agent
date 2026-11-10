@@ -2,7 +2,6 @@
 import unittest
 from unittest.mock import patch
 
-from fastapi import HTTPException
 from langchain_core.messages import AIMessage
 from sqlalchemy import func, select, text
 
@@ -10,7 +9,6 @@ import test_school_qa as fixture
 from app.models.assignments import Assignment
 from app.models.courses import Course
 from app.models.message import Message
-from app.services import school_qa
 from app.services.ispace import CourseSnapshot, SchoolLoginRequired, SchoolError
 
 rag = fixture.rag
@@ -90,15 +88,12 @@ class SchoolSyncQATests(unittest.TestCase):
             saved = db.scalar(select(Message).where(Message.conversation_id == result['conversation_id'], Message.role == 'assistant'))
             self.assertEqual(saved.response_data['tool_results'][0]['status'], 'completed')
 
-    def test_sync_default_disabled_in_schema_and_execution(self):
-        response = self.ask(allow_school_sync=False)
-        self.assertEqual(response.status_code, 502)
+    def test_sync_tool_always_exposed_and_executes_without_a_flag(self):
+        response = self.ask()
+        self.assertEqual(response.status_code, 200, response.text)
         schemas = self.llm.bind_tools.call_args.args[0]
-        self.assertNotIn('sync_school_course', [s['function']['name'] for s in schemas])
-        with self.sessions() as db, self.assertRaises(HTTPException) as error:
-            school_qa.query_assignments(db, 1, {'name': 'sync_school_course', 'args': {'course_id': 1}})
-        self.assertEqual(error.exception.status_code, 403)
-        self.collect.assert_not_called()
+        self.assertIn('sync_school_course', [s['function']['name'] for s in schemas])
+        self.collect.assert_called_once_with(URL)
 
     def test_document_scope_never_syncs(self):
         for args in ({'doc_ids': [1]}, {'document_id': 1, 'selected_text': 'sync this'}):
@@ -263,14 +258,12 @@ class SchoolSyncQATests(unittest.TestCase):
         with self.sessions() as db:
             self.assertEqual(db.scalar(select(func.count()).select_from(Course).where(Course.source_url == NEW_URL)), 0)
 
-    def test_school_id_validation_and_disabled_sync_block_discovery(self):
+    def test_school_id_validation_rejects_bad_identifiers(self):
         for args in [{'external_course_id': 22222.0}, {'external_course_id': True},
                      {'external_course_id': '0'}, {'external_course_id': '22222', 'course_id': 1},
                      {'external_course_id': -1}, {'external_course_id': '22222.0'}]:
             self.sync_plan(**args)
             self.assertEqual(self.ask().status_code, 502)
-        self.sync_plan(course_name='Software')
-        self.assertEqual(self.ask(allow_school_sync=False).status_code, 502)
         self.discover.assert_not_called()
 
     def match_reply(self, indices, confident=True):

@@ -32,12 +32,18 @@ export interface CitationHighlight {
   text: string
   pages?: number[]
 }
+/** 待用户确认的学校写操作：回答里带上它时，前端渲染「确认执行」按钮，点确认原样回传 */
+export interface PendingAction {
+  name: string
+  args: Record<string, unknown>
+}
 export interface Answer {
   answer: string
   conversation_id: number
   sources: Source[]
   retrieved_contexts: string[]
   tool_results?: Record<string, unknown>[]
+  pending_action?: PendingAction | null
 }
 export interface PageResult<T> {
   items: T[]

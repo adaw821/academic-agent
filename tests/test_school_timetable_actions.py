@@ -15,44 +15,53 @@ class TimetableActionTests(unittest.TestCase):
     plan = fixture.SchoolQATests.plan
 
     def action(self, name, args=None, **extra):
+        """经规划器路由：读工具直接执行，写工具只返回确认卡片。"""
         self.planner.invoke.return_value = AIMessage(content='', tool_calls=[
             dict(name=name, args=args or {}, id='timetable-action')])
         return self.client.post('/api/projects/1/ask', json=dict(
-            query='请执行这个课表操作', use_school_tools=True, allow_school_actions=True, **extra))
+            query='请执行这个课表操作', **extra))
+
+    def confirm(self, name, args=None, **extra):
+        """模拟用户点「确认执行」：回传写操作，直接落地。"""
+        return self.client.post('/api/projects/1/ask', json=dict(
+            query='确认执行', confirm_action=dict(name=name, args=args or {}), **extra))
 
     def test_add_edit_calendar_delete_and_owner_isolation(self):
         fields = dict(day_of_week='Mon', start_time='09:00', end_time='10:00', location='A101')
-        result = self.action('add_timetable_entry', dict(course_name='Database Systems', **fields))
+        result = self.confirm('add_timetable_entry', dict(course_name='Database Systems', **fields))
         self.assertEqual(result.status_code, 200, result.text)
         ident = result.json()['tool_results'][0]['id']
-        result = self.action('update_timetable_entry', dict(schedule_id=ident, **{**fields, 'location': 'B202'}))
+        result = self.confirm('update_timetable_entry', dict(schedule_id=ident, **{**fields, 'location': 'B202'}))
         self.assertEqual(result.status_code, 200, result.text)
-        result = self.action('set_timetable_calendar', dict(schedule_id=ident, term_start='2026-09-01', term_end='2026-12-31', week_pattern='odd'))
+        result = self.confirm('set_timetable_calendar', dict(schedule_id=ident, term_start='2026-09-01', term_end='2026-12-31', week_pattern='odd'))
         self.assertEqual(result.status_code, 200, result.text)
-        self.assertEqual(self.action('update_course_details', dict(course_id=1, teachers='新老师')).status_code, 200)
+        self.assertEqual(self.confirm('update_course_details', dict(course_id=1, teachers='新老师')).status_code, 200)
         with self.sessions() as db:
             self.assertEqual(db.get(Course, 1).course_name, 'Database Systems')
             self.assertEqual(db.get(Course, 1).teachers, '新老师')
             self.assertEqual(db.get(CourseSchedule, ident).location, 'B202')
             self.assertEqual(db.get(CourseSchedule, ident).week_pattern, 'odd')
-        self.assertEqual(self.action('update_course_details', dict(course_id=2, teachers='不可改')).status_code, 404)
+        self.assertEqual(self.confirm('update_course_details', dict(course_id=2, teachers='不可改')).status_code, 404)
         with self.sessions() as db:
             db.add(CourseSchedule(id=999, course_id=2, **fields))
             db.commit()
-        self.assertEqual(self.action('delete_timetable_entry', dict(schedule_id=999)).status_code, 404)
-        self.assertEqual(self.action('delete_timetable_entry', dict(schedule_id=ident)).status_code, 200)
+        self.assertEqual(self.confirm('delete_timetable_entry', dict(schedule_id=999)).status_code, 404)
+        self.assertEqual(self.confirm('delete_timetable_entry', dict(schedule_id=ident)).status_code, 200)
         with self.sessions() as db:
             self.assertIsNone(db.get(CourseSchedule, ident))
             self.assertIsNotNone(db.get(Course, 1))
 
-    def test_tools_require_opt_in_and_forbid_identity_paths(self):
-        self.planner.invoke.return_value = AIMessage(content='', tool_calls=[dict(name='open_mis_timetable', args={}, id='a')])
-        response = self.client.post('/api/projects/1/ask', json=dict(query='抓取课表', use_school_tools=True))
-        self.assertEqual(response.status_code, 502)
+    def test_write_actions_need_confirmation_and_reject_tampered_args(self):
+        # 规划器点到写操作时，先返回确认卡片（pending_action），不直接执行。
+        card = self.action('delete_timetable_entry', {'schedule_id': 1})
+        self.assertEqual(card.status_code, 200, card.text)
+        self.assertEqual(card.json()['pending_action']['name'], 'delete_timetable_entry')
+        # 确认回传的参数被篡改/非法时拒绝执行。
         for name, args in [('delete_timetable_entry', {'schedule_id': True}),
-                           ('get_mis_timetable', {'user_id': 2}),
-                           ('supplement_timetable_image', {'source': 'attachment', 'path': 'secret.png'})]:
-            self.assertEqual(self.action(name, args).status_code, 502)
+                           ('update_course_details', {'course_id': True, 'teachers': 'x'})]:
+            self.assertEqual(self.confirm(name, args).status_code, 400)
+        # 只读工具不走确认通道，非法身份参数仍被规划器拒绝。
+        self.assertEqual(self.action('get_mis_timetable', {'user_id': 2}).status_code, 502)
 
     def test_browser_is_blocked_for_nonlocal_requests_and_status_is_truthful(self):
         with patch('app.services.mis_timetable.enabled', return_value=True), patch('app.services.mis_timetable.mis_capture.start') as start:
@@ -79,9 +88,9 @@ class TimetableActionTests(unittest.TestCase):
             self.assertEqual(self.action('supplement_timetable_image', {'source': 'mis'}).status_code, 404)
 
     def test_durable_retry_does_not_repeat_completed_mutation(self):
-        self.planner.invoke.return_value = AIMessage(content='', tool_calls=[dict(
-            name='add_timetable_entry', args=dict(course_name='New Course', day_of_week='Fri', start_time='10:00', end_time='11:00'), id='a')])
-        job = self.client.post('/api/projects/1/ask/jobs', json=dict(query='新增课程', use_school_tools=True, allow_school_actions=True)).json()['job_id']
+        job = self.client.post('/api/projects/1/ask/jobs', json=dict(
+            query='确认执行', confirm_action=dict(name='add_timetable_entry',
+                args=dict(course_name='New Course', day_of_week='Fri', start_time='10:00', end_time='11:00')))).json()['job_id']
         durable = fixture.fixture.durable
         with patch.object(fixture.rag, 'history_messages_control', side_effect=RuntimeError('save interrupted')):
             durable.run_workflow(job)

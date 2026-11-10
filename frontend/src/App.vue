@@ -51,6 +51,7 @@ import {
   request,
   streamAsk,
   type Answer,
+  type PendingAction,
   type CitationHighlight,
   type Course,
   type Document,
@@ -92,11 +93,11 @@ const documents = ref<Document[]>([])
 const selectedIds = ref<number[]>([])
 const viewerDoc = ref<Document | null>(null)
 const chats = ref<Record<number, Chat>>({})
+// 无项目的默认对话用保留键 0（真实项目 id 都 > 0）。activeId 为 null 即默认窗口。
+const DEFAULT_KEY = 0
 const view = ref<'research' | 'timetable' | 'school'>('research')
 const activityOpen = ref(false)
 const historyLoading = ref(false)
-const allowSync = ref(false)
-const allowActions = ref(false)
 const agentImage = ref<{ id: string; name: string } | null>(null)
 const agentImageUploading = ref(false)
 const agentImageInput = ref<HTMLInputElement>()
@@ -321,9 +322,7 @@ const excerptDocName = computed(
 const processingCount = computed(
   () => documents.value.filter((d) => ['queued', 'processing'].includes(d.status)).length,
 )
-const currentChat = computed(() =>
-  activeId.value === null ? undefined : chats.value[activeId.value],
-)
+const currentChat = computed(() => chats.value[activeId.value ?? DEFAULT_KEY])
 const anyBusy = computed(
   () => asking.value || uploading.value || recognizing.value || modalBusy.value,
 )
@@ -724,8 +723,6 @@ function resetSession() {
   activityOpen.value = false
   error.value = ''
   notice.value = ''
-  allowSync.value = false
-  allowActions.value = false
   agentImage.value = null
   docRequest++
   clearTimeout(pollTimer)
@@ -749,7 +746,9 @@ async function loadProjects() {
   projectLoading.value = true
   try {
     projects.value = await request<Project[]>('/projects')
-    // 登录后默认不选项目，展示 welcome 页
+    // 登录后默认停在无项目的默认对话：初始化并恢复最近一段默认会话。
+    chats.value[DEFAULT_KEY] ??= { turns: [] }
+    if (!chats.value[DEFAULT_KEY].turns.length) void loadLatestConversation(null)
   } finally {
     projectLoading.value = false
   }
@@ -902,11 +901,21 @@ watch(activeId, (id) => {
     chats.value[id] ??= { turns: [] }
     void loadDocuments(id)
     if (!chats.value[id].turns.length) void loadLatestConversation(id)
+  } else {
+    // 默认窗口（无项目）：只恢复历史，不加载文档。
+    chats.value[DEFAULT_KEY] ??= { turns: [] }
+    if (!chats.value[DEFAULT_KEY].turns.length) void loadLatestConversation(null)
   }
 })
 function chooseProject(id: number) {
   activeId.value = id
   view.value = 'research'
+  sidebarOpen.value = false
+}
+/** 回到无项目的默认对话（AI 助手：工具 + 直接问答，不检索资料）。 */
+function openDefaultChat() {
+  view.value = 'research'
+  activeId.value = null
   sidebarOpen.value = false
 }
 /** 删除项目：点垃圾桶先弹确认窗口，确认后才真的删 */
@@ -985,18 +994,6 @@ function playDing() {
     dingAudio.play().catch(() => { /* 用户未交互时自动播放会被浏览器拦截，静默忽略 */ })
   } catch {}
 }
-async function autoCreateProject() {
-  try {
-    const ts = new Date().toLocaleString('zh-CN', { hour12: false }).replace(/[/:]/g, '-')
-    const name = `对话 ${ts}`
-    const result = await post<{ project_id: number }>('/projects', { name })
-    projects.value.unshift({ id: result.project_id, name })
-    activeId.value = result.project_id
-  } catch (e) {
-    if (e instanceof ApiError && e.status === 401) report(e)
-    else notice.value = e instanceof Error ? e.message : '创建项目失败'
-  }
-}
 function useSuggestion(text: string) {
   if (!user.value) return openModal('login')
   query.value = text
@@ -1009,10 +1006,11 @@ async function scrollChat() {
 async function ask() {
   if (!user.value) return openModal('login')
   if (!query.value.trim() || asking.value || historyLoading.value) return
-  if (!activeId.value) await autoCreateProject()
-  if (!activeId.value) return
+  // projectId 为 null = 默认窗口（不创项目，只走工具/直接问答，不检索资料）。
+  const projectId = activeId.value
   // 无文档也可提问:检索无上下文即走空;工具/点名由后端判。
   if (
+    projectId !== null &&
     excerptDocument.value &&
     selectedIds.value.length &&
     !selectedIds.value.includes(excerptDocument.value)
@@ -1020,9 +1018,9 @@ async function ask() {
     error.value = '原文所在文档需要包含在已选资料中。'
     return
   }
-  const id = activeId.value
+  const id = projectId ?? DEFAULT_KEY
   const version = sessionVersion
-  const chat = chats.value[id]!
+  const chat = (chats.value[id] ??= { turns: [] })
   const text = query.value.trim()
   // 气泡只显示干净的问题；划词引用的 AI 原话仅作为前缀发给后端，不进气泡。
   const sendText = quoted.value
@@ -1034,17 +1032,28 @@ async function ask() {
     query: sendText,
     conversation_id: chat.conversationId ?? null,
     candidate_k_percentage: recall.value / 100,
-    allow_school_sync: allowSync.value,
-    allow_school_actions: allowActions.value,
     ...(agentImage.value ? { timetable_image_id: agentImage.value.id } : {}),
-    ...(selectedIds.value.length ? { doc_ids: [...selectedIds.value] } : {}),
-    ...(excerptDocument.value
+    // 文档范围/划词只在项目窗口有意义；默认窗口不带这些字段。
+    ...(projectId !== null && selectedIds.value.length ? { doc_ids: [...selectedIds.value] } : {}),
+    ...(projectId !== null && excerptDocument.value
       ? { document_id: excerptDocument.value, selected_text: excerpt.value.trim() }
       : {}),
   }
   query.value = ''
   quoted.value = null
   clearExcerpt() // 划词原文也做成一次性：发送即清，原文追问不再关不掉
+  // 默认窗口不支持后台任务（durable），强制走流式。
+  await runAsk(projectId, chat, turnIndex, body, version, durableAsk.value && projectId !== null)
+}
+/** 实际发起一轮问答:流式或后台任务,统一处理中断、错误与收尾。ask() 和确认执行共用。 */
+async function runAsk(
+  projectId: number | null,
+  chat: Chat,
+  turnIndex: number,
+  body: Record<string, unknown>,
+  version: number,
+  durable: boolean,
+) {
   asking.value = true
   error.value = ''
   const seq = ++askSeq
@@ -1054,14 +1063,14 @@ async function ask() {
   const signal = askController.signal
   void scrollChat()
   try {
-    if (durableAsk.value) {
-      const result = await post<Job>(`/projects/${id}/ask/jobs`, body, signal)
+    if (durable && projectId !== null) {
+      const result = await post<Job>(`/projects/${projectId}/ask/jobs`, body, signal)
       if (version !== sessionVersion) return
       chat.turns[turnIndex]!.jobId = result.job_id
-      await pollAnswer(id, chat, turnIndex, result.job_id, version)
+      await pollAnswer(projectId, chat, turnIndex, result.job_id, version)
     } else {
       await streamAsk(
-        `/projects/${id}/ask/stream`,
+        projectId === null ? '/ask/stream' : `/projects/${projectId}/ask/stream`,
         body,
         {
           onToken: (text) => {
@@ -1109,6 +1118,24 @@ async function ask() {
     void scrollChat()
   }
 }
+/** 用户点回答里的「确认执行」:新开一轮,把待执行操作原样回传后端直接执行。 */
+async function confirmAction(pending: PendingAction) {
+  if (!user.value || asking.value || historyLoading.value) return
+  const projectId = activeId.value
+  const id = projectId ?? DEFAULT_KEY
+  const version = sessionVersion
+  const chat = (chats.value[id] ??= { turns: [] })
+  const turn: Turn = { question: '确认执行上述操作' }
+  const turnIndex = chat.turns.push(turn) - 1
+  const body = {
+    query: '确认执行上述操作',
+    conversation_id: chat.conversationId ?? null,
+    candidate_k_percentage: recall.value / 100,
+    confirm_action: { name: pending.name, args: pending.args },
+  }
+  void scrollChat()
+  await runAsk(projectId, chat, turnIndex, body, version, false)
+}
 /** 停止当前这轮问答：中断请求、结束轮询，这一轮标记为“已停止” */
 function stopAsking() {
   if (!asking.value) return
@@ -1148,8 +1175,10 @@ async function pollAnswer(id: number, chat: Chat, index: number, jobId: string, 
   throw new Error('任务仍在后台处理，可在“历史与任务”中继续查看。')
 }
 async function openConversation(conversationId: number) {
-  if (!activeId.value || asking.value) return
-  const id = activeId.value,
+  if (asking.value) return
+  const projectId = activeId.value,
+    id = projectId ?? DEFAULT_KEY,
+    base = projectId === null ? '' : `/projects/${projectId}`,
     version = sessionVersion,
     sequence = ++historyRequest
   historyLoading.value = true
@@ -1159,9 +1188,9 @@ async function openConversation(conversationId: number) {
       total = 1
     while (offset < total) {
       const result = await request<PageResult<HistoryMessage>>(
-        `/projects/${id}/conversations/${conversationId}/messages?limit=100&offset=${offset}`,
+        `${base}/conversations/${conversationId}/messages?limit=100&offset=${offset}`,
       )
-      if (version !== sessionVersion || id !== activeId.value || sequence !== historyRequest) return
+      if (version !== sessionVersion || projectId !== activeId.value || sequence !== historyRequest) return
       messages.push(...result.items)
       total = result.total
       offset += result.items.length
@@ -1203,13 +1232,14 @@ async function openConversation(conversationId: number) {
 function imported(projectId: number) {
   if (projectId === activeId.value) void loadDocuments(projectId)
 }
-async function loadLatestConversation(id: number) {
+async function loadLatestConversation(projectId: number | null) {
   const version = sessionVersion
+  const base = projectId === null ? '' : `/projects/${projectId}`
   try {
     const result = await request<PageResult<{ id: number }>>(
-      `/projects/${id}/conversations?limit=1&offset=0`,
+      `${base}/conversations?limit=1&offset=0`,
     )
-    if (version !== sessionVersion || id !== activeId.value) return
+    if (version !== sessionVersion || projectId !== activeId.value) return
     if (result.items.length) await openConversation(result.items[0].id)
   } catch {
     // 后台预载失败时保持欢迎页，不打断进入项目
@@ -1217,8 +1247,7 @@ async function loadLatestConversation(id: number) {
 }
 /** 历史会话被删掉：删的正是当前打开的那段时，回到空白新对话 */
 function conversationDeleted(conversationId: number) {
-  const id = activeId.value
-  if (!id) return
+  const id = activeId.value ?? DEFAULT_KEY
   const chat = chats.value[id]
   if (!chat || chat.conversationId !== conversationId) return
   chats.value[id] = { turns: [] }
@@ -1226,8 +1255,8 @@ function conversationDeleted(conversationId: number) {
   query.value = ''
 }
 function newChat() {
-  if (activeId.value && !asking.value && !historyLoading.value) {
-    chats.value[activeId.value] = { turns: [] }
+  if (!asking.value && !historyLoading.value) {
+    chats.value[activeId.value ?? DEFAULT_KEY] = { turns: [] }
     source.value = null
     query.value = ''
   }
@@ -1373,6 +1402,15 @@ onUnmounted(() => {
           <GraduationCap :size="18" />学校事务
         </button>
       </nav>
+      <div class="project-item-wrap default-chat-wrap" :class="{ selected: view === 'research' && activeId === null }">
+        <button
+          class="project-item"
+          :class="{ selected: view === 'research' && activeId === null }"
+          @click="openDefaultChat"
+        >
+          <Sparkles :size="16" /><span>默认对话</span><ChevronRight :size="13" />
+        </button>
+      </div>
       <div class="section-caption">
         我的项目 <span>{{ projects.length.toString().padStart(2, '0') }}</span>
       </div>
@@ -1476,8 +1514,9 @@ onUnmounted(() => {
               <h1>{{ activeProject?.name || '研究工作台' }}</h1>
               <span class="tiny-label">RESEARCH SPACE</span>
             </div>
-            <div v-if="activeId" class="toolbar-actions">
+            <div v-if="activeId || currentChat?.turns.length" class="toolbar-actions">
               <button
+                v-if="activeId"
                 class="subtle-button"
                 :disabled="!activeId || historyLoading"
                 @click="activityOpen = !activityOpen"
@@ -1499,6 +1538,7 @@ onUnmounted(() => {
               >
                 <Plus :size="16" />新对话</button
               ><button
+                v-if="activeId"
                 class="icon-button docs-toggle"
                 aria-label="查看项目资料"
                 @click="mobileDocs = !mobileDocs"
@@ -1560,7 +1600,7 @@ onUnmounted(() => {
               @refresh="loadDocuments(activeId)"
             />
             <p v-if="historyLoading" class="feature-notice" role="status">正在恢复历史会话…</p>
-            <section v-if="!activeId" class="welcome welcome-default">
+            <section v-if="!activeId && !currentChat?.turns.length" class="welcome welcome-default">
               <div class="welcome-paper-content">
                 <img class="welcome-emblem-img" src="/brand-icon.png" alt="BNBU" />
                 <div class="welcome-title">Academic Agent</div>
@@ -1591,7 +1631,7 @@ onUnmounted(() => {
                     :disabled="!user"
                     maxlength="10000"
                     rows="2"
-                    placeholder="直接提问，将自动创建一个对话项目…"
+                    placeholder="直接提问，或查询作业 / 课表 / 提醒（默认助手不检索资料）…"
                     aria-label="输入问题"
                     @keydown.enter="
                       (event) => {
@@ -1604,7 +1644,7 @@ onUnmounted(() => {
                   ></textarea>
                   <div class="welcome-composer-bottom">
                     <span class="welcome-scope-hint"
-                      ><Layers3 :size="13" />自动项目 · 全部资料</span
+                      ><Layers3 :size="13" />默认助手 · 工具与直接问答，不检索资料</span
                     >
                     <button
                       v-if="asking"
@@ -1630,12 +1670,6 @@ onUnmounted(() => {
                 <div class="welcome-toolbar">
                   <div class="welcome-toggles">
                     <label class="check-label"
-                      ><input v-model="allowSync" type="checkbox" :disabled="asking" />允许同步课程</label
-                    >
-                    <label class="check-label"
-                      ><input v-model="allowActions" type="checkbox" :disabled="asking" />允许下载、导入、已读和课表操作</label
-                    >
-                    <label class="check-label"
                       ><input v-model="durableAsk" type="checkbox" :disabled="asking" />后台问答
                       <span
                         class="hint-wrap"
@@ -1654,7 +1688,7 @@ onUnmounted(() => {
                 </div>
               </div>
             </section>
-            <section v-else-if="!currentChat?.turns.length" class="welcome welcome-empty-chat">
+            <section v-else-if="activeId && !currentChat?.turns.length" class="welcome welcome-empty-chat">
               <img class="welcome-emblem-img" src="/brand-icon.png" alt="BNBU" />
               <div class="welcome-title">{{ activeProject?.name }}</div>
               <div class="empty-chat-suggestions">
@@ -1716,9 +1750,32 @@ onUnmounted(() => {
                     </p>
                     <p v-else-if="turn.stopped" class="turn-stopped">已停止这一轮回答</p>
                     <p v-else class="thinking">
-                      <LoaderCircle :size="16" class="spin" />正在检索资料、整理回答…
+                      <LoaderCircle :size="16" class="spin" />{{ activeId ? '正在检索资料、整理回答…' : '正在整理回答…' }}
                       <button type="button" class="text-button" @click="stopAsking">停止</button>
                     </p>
+                    <div
+                      v-if="
+                        turn.result?.pending_action &&
+                        index === currentChat.turns.length - 1 &&
+                        !asking
+                      "
+                      class="confirm-action"
+                    >
+                      <button
+                        type="button"
+                        class="confirm-btn"
+                        @click="confirmAction(turn.result.pending_action!)"
+                      >
+                        <Check :size="14" />确认执行
+                      </button>
+                      <button
+                        type="button"
+                        class="text-button"
+                        @click="turn.result.pending_action = null"
+                      >
+                        取消
+                      </button>
+                    </div>
                     <p v-if="turn.jobId" class="job-id">
                       任务 {{ turn.jobId }} · 刷新后可从“历史与任务”找回
                     </p>
@@ -1752,26 +1809,13 @@ onUnmounted(() => {
             </button>
           </div>
  
-          <div v-if="activeId" class="composer-wrap">
+          <div v-if="activeId || currentChat?.turns.length" class="composer-wrap">
             <div v-if="settingsOpen" class="ask-settings">
               <label
                 >检索范围比例 <strong>{{ recall }}%</strong
                 ><input v-model.number="recall" type="range" min="5" max="100" step="5" /></label>
             </div>
             <div class="school-tool-settings">
-              <label class="check-label"
-                ><input
-                  v-model="allowSync"
-                  type="checkbox"
-                  :disabled="asking"
-                />允许同步课程</label
-              ><label class="check-label"
-                ><input
-                  v-model="allowActions"
-                  type="checkbox"
-                  :disabled="asking"
-                />允许下载、导入、已读和课表操作</label
-              >
               <label class="check-label"
                 ><input
                   v-model="durableAsk"
@@ -1816,14 +1860,14 @@ onUnmounted(() => {
               <textarea
                 ref="composer"
                 v-model="query"
-                :disabled="!user || !activeId"
+                :disabled="!user"
                 maxlength="10000"
                 rows="2"
                 :placeholder="
                   !user
                     ? '登录后，开启与你的资料的第一场对话…'
                     : !activeId
-                      ? '创建项目，开始整理你的研究资料…'
+                      ? '直接提问，或查询作业 / 课表 / 提醒（默认助手不检索资料）…'
                       : !selectedIds.length && !excerptDocument
                         ? '查询学校作业、课表、提醒，或明确要求执行操作…'
                         : !readyDocs.length
@@ -1841,7 +1885,7 @@ onUnmounted(() => {
                 "
               ></textarea>
               <div class="composer-bottom">
-                <div class="scope-anchor">
+                <div v-if="activeId" class="scope-anchor">
                   <div v-if="scopeOpen" class="scope-backdrop" @click="scopeOpen = false"></div>
                   <button
                     type="button"

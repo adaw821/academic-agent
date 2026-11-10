@@ -12,9 +12,17 @@ class Conversation(Base):
         primary_key = True
     )
 
-    project_id: Mapped[int] = mapped_column(
+    # 绑定项目时用于资料检索与归属；无项目的默认对话此列为空，归属改看 user_id。
+    project_id: Mapped[int | None] = mapped_column(
         ForeignKey("projects.id"),
-        nullable=False,
+        nullable=True,
+        index=True
+    )
+
+    # 无项目对话的归属锚：项目对话也一并写入，便于统一校验。
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=True,
         index=True
     )
 

@@ -18,31 +18,38 @@ class SchoolActionsCalendarTests(unittest.TestCase):
     plan = fixture.SchoolQATests.plan
 
     def action(self, name, args, **extra):
+        """经规划器路由：写工具只返回确认卡片。"""
         self.planner.invoke.return_value = AIMessage(content='', tool_calls=[dict(name=name, args=args, id='action')])
-        return self.client.post('/api/projects/1/ask', json=dict(
-            query='请执行这项操作', use_school_tools=True, allow_school_actions=True, **extra))
+        return self.client.post('/api/projects/1/ask', json=dict(query='请执行这项操作', **extra))
 
-    def test_actions_are_opt_in_and_do_not_accept_identity_or_destination(self):
+    def confirm(self, name, args, **extra):
+        """模拟用户点「确认执行」：回传写操作，直接落地。"""
+        return self.client.post('/api/projects/1/ask', json=dict(
+            query='确认执行', confirm_action=dict(name=name, args=args), **extra))
+
+    def test_write_actions_need_confirmation_and_reject_tampered_args(self):
         with patch('app.services.school_downloads.download_resource') as download:
-            self.planner.invoke.return_value = AIMessage(content='', tool_calls=[dict(
-                name='download_school_resource', args=dict(course_id=1, resource_id=1), id='action')])
-            response = self.client.post('/api/projects/1/ask', json=dict(query='下载附件', use_school_tools=True))
-            self.assertEqual(response.status_code, 502)
+            # 规划器点到写操作时，先返回确认卡片而非直接执行。
+            card = self.action('download_school_resource', dict(course_id=1, resource_id=1))
+            self.assertEqual(card.status_code, 200, card.text)
+            self.assertEqual(card.json()['pending_action'],
+                             dict(name='download_school_resource', args=dict(course_id=1, resource_id=1)))
+            # 确认回传的参数被篡改/非法时拒绝执行。
             for args in [dict(course_id=1, resource_id=1, user_id=2), dict(course_id=True, resource_id=1)]:
-                self.assertEqual(self.action('download_school_resource', args).status_code, 502)
+                self.assertEqual(self.confirm('download_school_resource', args).status_code, 400)
             download.assert_not_called()
         with self.sessions() as db:
-            with self.assertRaises(Exception) as raised:
-                query_assignments(db, 1, dict(name='download_school_resource', args={}))
-            self.assertEqual(raised.exception.status_code, 403)
+            data = query_assignments(db, 1, dict(name='download_school_resource', args={}))
+            self.assertEqual(data['status'], 'confirm_required')
+            self.assertEqual(data['pending_action']['name'], 'download_school_resource')
 
     def test_download_and_import_route_to_authenticated_current_project(self):
         with patch('app.services.school_downloads.download_resource', return_value=dict(resource_id=5, downloaded=True)) as run:
-            response = self.action('download_school_resource', dict(course_id=1, resource_id=5))
+            response = self.confirm('download_school_resource', dict(course_id=1, resource_id=5))
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(run.call_args.args[1:], (1, 1, 5))
         with patch('app.services.school_imports.import_resource', return_value=dict(document_id=4, job_id='job', status='queued')) as run:
-            response = self.action('import_school_resource', dict(course_id=1, resource_id=5))
+            response = self.confirm('import_school_resource', dict(course_id=1, resource_id=5))
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(run.call_args.args[1:], (1, 1, 5, 1))
             self.assertEqual(response.json()['tool_results'][0]['status'], 'queued')
@@ -53,9 +60,9 @@ class SchoolActionsCalendarTests(unittest.TestCase):
             db.add_all([DeadlineReminder(id=1, assignment_id=1, due_at=now, created_at=now),
                         DeadlineReminder(id=2, assignment_id=3, due_at=now, created_at=now)])
             db.commit()
-        self.assertEqual(self.action('mark_school_reminder_read', dict(reminder_id=2)).status_code, 404)
+        self.assertEqual(self.confirm('mark_school_reminder_read', dict(reminder_id=2)).status_code, 404)
         for _ in range(2):
-            self.assertEqual(self.action('mark_school_reminder_read', dict(reminder_id=1)).status_code, 200)
+            self.assertEqual(self.confirm('mark_school_reminder_read', dict(reminder_id=1)).status_code, 200)
         with self.sessions() as db:
             self.assertIsNotNone(db.get(DeadlineReminder, 1).read_at)
             self.assertIsNone(db.get(DeadlineReminder, 2).read_at)
@@ -78,10 +85,9 @@ class SchoolActionsCalendarTests(unittest.TestCase):
                 TeachingCalendar.model_validate(bad)
 
     def test_action_durable_retry_reuses_checkpoint(self):
-        self.planner.invoke.return_value = AIMessage(content='', tool_calls=[dict(
-            name='download_school_resource', args=dict(course_id=1, resource_id=5), id='action')])
         job = self.client.post('/api/projects/1/ask/jobs', json=dict(
-            query='下载附件', use_school_tools=True, allow_school_actions=True)).json()['job_id']
+            query='确认执行', confirm_action=dict(name='download_school_resource',
+                args=dict(course_id=1, resource_id=5)))).json()['job_id']
         durable = fixture.fixture.durable
         with patch('app.services.school_downloads.download_resource', return_value=dict(resource_id=5, downloaded=True)) as run:
             with patch.object(fixture.rag, 'history_messages_control', side_effect=RuntimeError('save interrupted')):

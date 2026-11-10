@@ -3,15 +3,22 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+class ConfirmAction(BaseModel):
+    """用户在回答内点击「确认执行」后回传的待执行学校操作，跳过规划直接执行。"""
+    model_config = ConfigDict(extra='forbid')
+    name: str = Field(min_length=1, max_length=64)
+    args: dict = Field(default_factory=dict)
+
+
 class SearchRequest(BaseModel):
     """问题接收接口"""
     model_config = ConfigDict(str_strip_whitespace=True)
 
     # 用户问题：支持长题设，按字符数限制，不截断内容。
     query: str = Field(min_length=1, max_length=10000)
-    allow_school_actions: bool = Field(default=False, description="允许学校课表获取、图片补充、课表增删改、下载附件、导入当前项目和标记提醒已读。")
     timetable_image_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$', description='本轮课表图片附件，由上传接口返回，服务器校验账号归属')
-    allow_school_sync: bool = Field(default=False, description="允许同步单门课程；本地名称未匹配时自动发现学校课程并在唯一匹配后首次导入。指定文档或选区时不执行同步。")
+    # 学校动作/同步工具一律向模型开放；写操作先返回待确认卡片，用户点确认后由此字段回传原样执行。
+    confirm_action: ConfirmAction | None = Field(default=None, description="用户点击确认后回传的待执行学校操作，跳过规划直接执行。")
     #需要检索子片占总体子片的百分比
     candidate_k_percentage: float = Field(
         default=0.4, gt=0, le=1, allow_inf_nan=False,

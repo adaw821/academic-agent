@@ -24,10 +24,12 @@ with patch.dict(os.environ, {
     from app.models.projects import Project
     from app.models.conversation import Conversation
     from app.models.message import Message
+    from app.models.documents import Document
     from app.routers import rag_flow
     from app.services import answer_services as answers
     from app.services import context_management as context
     from app.services import search_services as search
+    from app.services import school_qa
 
 from fastapi import HTTPException
 from app.schemas.search import SearchRequest
@@ -52,6 +54,7 @@ class ContextTests(unittest.TestCase):
         self.engine = create_engine("sqlite:///" + (Path(self.temp.name) / "test.db").as_posix())
         Base.metadata.create_all(self.engine, tables=[
             User.__table__, Project.__table__, Conversation.__table__, Message.__table__,
+            Document.__table__,
         ])
         self.sessions = sessionmaker(bind=self.engine, autoflush=False)
         self.db = self.sessions()
@@ -95,6 +98,9 @@ class ContextTests(unittest.TestCase):
         request = SearchRequest(query="question", conversation_id=None, candidate_k_percentage=0.4)
         with patch.object(search, "llm", model()) as rewrite, patch.object(answers, "llm", model()), \
              patch.object(answers, "count_message_tokens", return_value=100), \
+             patch.object(school_qa, "plan_assignment_query", return_value=None), \
+             patch.object(rag_flow, "_scope_has_materials", return_value=True), \
+             patch.object(rag_flow, "needs_materials", return_value=True), \
              patch.object(rag_flow, "search_vector", return_value=[]), \
              patch.object(rag_flow, "search_bm25", return_value=[]), \
              patch.object(rag_flow, "rerank_results", return_value=self.chunk):
@@ -284,6 +290,9 @@ class ContextTests(unittest.TestCase):
                 request = SearchRequest(query="question", conversation_id=1, candidate_k_percentage=0.4)
                 with patch.object(answers, "llm", model(content, finish)), \
                      patch.object(answers, "count_message_tokens", return_value=100), \
+                     patch.object(school_qa, "plan_assignment_query", return_value=None), \
+                     patch.object(rag_flow, "_scope_has_materials", return_value=True), \
+                     patch.object(rag_flow, "needs_materials", return_value=True), \
                      patch.object(rag_flow, "search_vector", return_value=[]), \
                      patch.object(rag_flow, "search_bm25", return_value=[]), \
                      patch.object(rag_flow, "rerank_results", return_value=self.chunk):

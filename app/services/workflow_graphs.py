@@ -26,8 +26,10 @@ class QAState(TypedDict, total=False):
     result: dict
     assignment_tool: dict | None
     assignment_data: dict
+    confirmed: bool
     overview_plan: dict | None
     route: str
+    direct: bool
 
 
 class DocumentState(TypedDict, total=False):
@@ -52,7 +54,7 @@ def build_qa_graph(nodes):
         graph.add_edge(source, target)
     graph.add_edge("history", "route")
     route_targets = {"overview": "overview_retrieve", "continue": "rewrite",
-                     "whole_doc": "answer", "clarify": "save"}
+                     "whole_doc": "answer", "direct": "answer", "clarify": "save"}
     if "assignment_query" in nodes:
         route_targets["tool"] = "assignment_query"
     graph.add_conditional_edges("route", lambda state: state["route"], route_targets)

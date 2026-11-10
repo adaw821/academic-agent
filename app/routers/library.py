@@ -218,6 +218,61 @@ def delete_conversation(project_id: int, conversation_id: int, db: Session = Dep
     return {"conversation_id": conversation_id, "deleted": True, "messages": len(message_ids)}
 
 
+# —— 无项目的默认对话：归属看 user_id，project_id 为空；只有消息，无文档/批注 ——
+def default_conversation_access(db, conversation_id, user):
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None or conversation.project_id is not None or conversation.user_id != user.id:
+        raise HTTPException(404, "会话不存在")
+    return conversation
+
+
+@router.get("/conversations")
+def default_conversations(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0),
+                          db: Session = Depends(get_db), user: User = Depends(get_currentUser)):
+    where = (Conversation.user_id == user.id) & (Conversation.project_id.is_(None))
+    latest = select(Message.conversation_id, func.max(Message.id).label("last_id"),
+                    func.max(Message.created_at).label("updated_at"),
+                    func.count().label("message_count")).group_by(Message.conversation_id).subquery()
+    rows = db.execute(select(Conversation, latest.c.updated_at, latest.c.message_count)
+                      .outerjoin(latest, latest.c.conversation_id == Conversation.id).where(where)
+                      .order_by(func.coalesce(latest.c.updated_at, Conversation.created_at).desc(),
+                                Conversation.id.desc()).offset(offset).limit(limit)).all()
+    return {"items": [{"id": c.id, "title": c.title, "created_at": c.created_at,
+                       "updated_at": updated or c.created_at, "message_count": count or 0}
+                      for c, updated, count in rows],
+            "total": db.scalar(select(func.count()).select_from(Conversation).where(where)),
+            "limit": limit, "offset": offset}
+
+
+@router.get("/conversations/{conversation_id}/messages")
+def default_messages(conversation_id: int, limit: int = Query(100, ge=1, le=500),
+                     offset: int = Query(0, ge=0), db: Session = Depends(get_db),
+                     user: User = Depends(get_currentUser)):
+    conversation = default_conversation_access(db, conversation_id, user)
+    where = Message.conversation_id == conversation_id
+    rows = db.scalars(select(Message).where(where).order_by(Message.id).offset(offset).limit(limit))
+    items = []
+    for message in rows:
+        items.append({"id": message.id, "role": message.role, "content": message.content,
+                      "turn_id": message.turn_id, "created_at": message.created_at,
+                      "response_data": message.response_data, "selection": None})
+    return {"conversation_id": conversation.id, "title": conversation.title, "items": items,
+            "total": db.scalar(select(func.count()).select_from(Message).where(where)),
+            "limit": limit, "offset": offset}
+
+
+@router.delete("/conversations/{conversation_id}")
+def default_delete_conversation(conversation_id: int, db: Session = Depends(get_db),
+                                user: User = Depends(get_currentUser)):
+    conversation = default_conversation_access(db, conversation_id, user)
+    message_count = db.scalar(select(func.count()).select_from(Message).where(
+        Message.conversation_id == conversation_id))
+    db.execute(delete(Message).where(Message.conversation_id == conversation_id))
+    db.delete(conversation)
+    db.commit()
+    return {"conversation_id": conversation_id, "deleted": True, "messages": message_count or 0}
+
+
 @router.get("/projects/{project_id}/documents/{document_id}/content")
 def document_content(project_id: int, document_id: int, db: Session = Depends(get_db),
                      user: User = Depends(get_currentUser)):

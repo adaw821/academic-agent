@@ -38,6 +38,15 @@ translator = ChatOpenAI(
     extra_body={"reasoning_effort": "low"},
 )
 
+# 路由兜底处的二元判断：答这题是否需要查用户上传的资料。单 token 输出，最快档。
+materials_classifier = ChatOpenAI(
+    model="glm-4.5-airx",
+    base_url="https://open.bigmodel.cn/api/paas/v4/",
+    api_key=os.environ["ZHIPU_API_KEY"],
+    max_tokens=4,
+    extra_body={"reasoning_effort": "low"},
+)
+
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
 FILE_TYPES = {
@@ -296,6 +305,18 @@ def require_document_scope(
         raise HTTPException(status_code=409, detail="指定文档尚未完成处理，请检查文档状态")
     return unique_ids
 
+
+def _scope_has_materials(db: Session, project_id: int | None, scope_ids: list[int] | None) -> bool:
+    """当前范围内是否存在可检索的已完成文档；无项目或空项目恒为 False。"""
+    if project_id is None:
+        return False
+    statement = select(Document.id).where(
+        Document.project_id == project_id, Document.status == "completed"
+    )
+    if scope_ids:
+        statement = statement.where(Document.id.in_(scope_ids))
+    return db.execute(statement.limit(1)).first() is not None
+
 @timed_stage("qa.translate")
 def translate_query(query: str) -> str | None:
     translated_query = None
@@ -353,6 +374,39 @@ def translate_query(query: str) -> str | None:
     return translated_query
 
 
+@timed_stage("qa.classify_materials")
+def needs_materials(query: str, history: list[dict], summary: str = "") -> bool:
+    """判断回答这个问题是否需要查阅用户上传的资料。
+
+    仅在「项目里确有材料、且工具/点名/概述都没命中」时调用。解析失败一律保守回退到
+    True（宁可多检索也别漏材料）。
+    """
+    recent = "\n".join(f'{h["role"]}: {h["content"]}' for h in history[-4:])
+    messages = [
+        SystemMessage(content=(
+            "你是一个问答路由判断器。用户有一个已上传学习/科研资料的项目。\n"
+            "判断：回答下面这条问题，是否需要查阅该项目里上传的资料？\n"
+            "- 需要（针对具体文档内容、课件、论文、某份资料里的事实、总结某材料等）→ 输出：是\n"
+            "- 不需要（通用知识、概念解释、写作/翻译/计算、闲聊、与具体资料无关）→ 输出：否\n"
+            "只输出一个字：是 或 否，不要输出其他内容。"
+        )),
+        HumanMessage(content=(
+            (f"最近对话：\n{recent}\n\n" if recent else "")
+            + (f"对话摘要：{summary}\n\n" if summary else "")
+            + f"当前问题：{query}"
+        )),
+    ]
+    try:
+        with measure_stage("qa.classify_materials_llm"):
+            response = materials_classifier.invoke(messages)
+        text = (response.content or "").strip()
+        # 命中「否」才判为无需检索；其余（含空、异常字符）保守走检索。
+        return "否" not in text
+    except Exception as exc:
+        logger.warning("event=materials_classify_failed error_type=%s", type(exc).__name__)
+        return True
+
+
 @timed_stage("qa.retrieve")
 def retrieve_documents(
         query: str,
@@ -392,12 +446,17 @@ def _build_qa_graph(project_id, request, db, user, *, checkpoints=None, local_br
     if checkpoints is not None:
         db.info["durable_workflow"] = True
     def validate(state):
-        require_project(db, project_id, user)
         db.info['local_browser_allowed'] = local_browser_allowed
         db.info['timetable_image_id'] = request.timetable_image_id
         if request.timetable_image_id:
             from app.services.timetable_attachments import read_image
             read_image(user.id, request.timetable_image_id)
+        # 无项目的默认对话:不绑项目,只能走工具/直接问答,不支持指定文档。
+        if project_id is None:
+            if request.doc_ids is not None or request.document_id is not None:
+                raise HTTPException(status_code=422, detail="默认对话不支持指定文档，请在项目内提问")
+            return {"doc_ids": None, "selection": None}
+        require_project(db, project_id, user)
         doc_ids = require_document_scope(db, project_id, request.doc_ids)
         selection = None
         if request.document_id is not None:
@@ -413,7 +472,7 @@ def _build_qa_graph(project_id, request, db, user, *, checkpoints=None, local_br
         return {"doc_ids": doc_ids, "selection": selection}
 
     def history(state):
-        messages, summary, boundary = get_history_messages(request.conversation_id, db, project_id)
+        messages, summary, boundary = get_history_messages(request.conversation_id, db, project_id, user.id)
         return {"history": messages, "summary": summary, "summary_boundary": boundary}
 
     def rewrite(state):
@@ -426,10 +485,18 @@ def _build_qa_graph(project_id, request, db, user, *, checkpoints=None, local_br
         return {"translated_query": translate_query(state["search_query"])}
 
     def route(state):
+        # 用户点了回答里的「确认执行」:跳过规划,直接拿回传的操作去执行。
+        if request.confirm_action is not None:
+            performance_logger.info("event=qa_route route=confirm_action tool=%s",
+                                    request.confirm_action.name)
+            return {"route": "tool", "confirmed": True, "assignment_tool": {
+                "name": request.confirm_action.name, "id": "confirm-action",
+                "args": request.confirm_action.args,
+            }}
         # 定作用域:勾选优先;没勾选就拿原始问题点名解析(确定性,只认类型+编号/文件名)。
         scope_ids = state["doc_ids"]
         named = False
-        if scope_ids is None and state["selection"] is None:
+        if project_id is not None and scope_ids is None and state["selection"] is None:
             hit = resolve_named_docs(request.query, project_id, db)
             if hit:
                 scope_ids, named = hit, True
@@ -456,8 +523,8 @@ def _build_qa_graph(project_id, request, db, user, *, checkpoints=None, local_br
                                             scope_ids[0], len(chunks))
                     return {"route": "whole_doc", "final_chunks": chunks}
 
-        # 概述(装不下的大文件总结):复用 scope_ids。
-        plan = None if state["selection"] is not None else plan_document_overview(
+        # 概述(装不下的大文件总结):复用 scope_ids。无项目时没有可概述的文档。
+        plan = None if (state["selection"] is not None or project_id is None) else plan_document_overview(
             request.query, project_id, db, scope_ids,
             allow_implicit=not (state["history"] or state["summary"]),
         )
@@ -470,17 +537,21 @@ def _build_qa_graph(project_id, request, db, user, *, checkpoints=None, local_br
             from app.services.school_qa import plan_assignment_query
             tool = plan_assignment_query(
                 request.query, state["history"], state["summary"],
-                allow_school_sync=request.allow_school_sync,
-                allow_school_actions=request.allow_school_actions,
                 has_timetable_image=bool(request.timetable_image_id),
             )
             if tool:
                 performance_logger.info("event=qa_route route=tool")
                 return {"route": "tool", "assignment_tool": tool}
 
-        # 兜底:检索。点名了就把范围收紧到那份(retrieve 读 state["doc_ids"])。
-        performance_logger.info("event=qa_route route=continue")
-        return {"route": "continue", "doc_ids": scope_ids}
+        # 工具也没命中:判断要不要查资料。无项目/空项目 → 确定性直答(省掉分类器)。
+        has_materials = _scope_has_materials(db, project_id, scope_ids)
+        if has_materials and needs_materials(request.query, state["history"], state["summary"]):
+            # 检索。点名了就把范围收紧到那份(retrieve 读 state["doc_ids"])。
+            performance_logger.info("event=qa_route route=continue")
+            return {"route": "continue", "doc_ids": scope_ids}
+        # 直接答:凭模型自身知识回答,不走检索/rerank。
+        performance_logger.info("event=qa_route route=direct has_materials=%s", has_materials)
+        return {"route": "direct", "final_chunks": [], "direct": True}
 
     def overview_retrieve(state):
         plan = state["overview_plan"]
@@ -515,6 +586,8 @@ def _build_qa_graph(project_id, request, db, user, *, checkpoints=None, local_br
 
     def answer(state):
         options = {"overview": True} if state.get("overview_plan") else {}
+        if state.get("direct"):
+            options["direct"] = True
         return {"result": generate_answer(
             request.query, state["final_chunks"], state["history"], request.conversation_id, db, project_id,
             summary=state["summary"], summary_boundary=state["summary_boundary"], selection=state["selection"],
@@ -528,7 +601,7 @@ def _build_qa_graph(project_id, request, db, user, *, checkpoints=None, local_br
         result = dict(state["result"])
         result["conversation_id"] = history_messages_control(
             result["answer"], history_query, request.conversation_id, db, project_id,
-            response_data=result, commit=checkpoints is None,
+            response_data=result, commit=checkpoints is None, user_id=user.id,
         )
         if state["selection"] is not None:
             result["selection"] = state["selection"]
@@ -547,7 +620,7 @@ def _build_qa_graph(project_id, request, db, user, *, checkpoints=None, local_br
 
         def assignment_query(state):
             return {"assignment_data": query_assignments(db, user.id, state["assignment_tool"], project_id=project_id,
-                                                        allow_school_sync=request.allow_school_sync, allow_school_actions=request.allow_school_actions)}
+                                                        confirmed=state.get("confirmed", False))}
 
         def assignment_answer(state):
             return {"result": answer_assignments(request.query, state["assignment_tool"], state["assignment_data"])}
@@ -609,6 +682,35 @@ def user_asking_stream(
     local = bool(http_request.client and http_request.client.host in {'127.0.0.1', '::1'})
     return StreamingResponse(
         stream_qa_events(project_id, request, db, user, local_browser_allowed=local),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/ask")
+@timed_stage("qa.total")
+def default_asking(
+    request: SearchRequest,
+    http_request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_currentUser),
+):
+    """无项目的默认对话:只走工具/直接问答,不检索资料。"""
+    return execute_qa(None, request, db, user,
+                      local_browser_allowed=bool(http_request.client and http_request.client.host in {'127.0.0.1', '::1'}))
+
+
+@router.post("/ask/stream")
+def default_asking_stream(
+    request: SearchRequest,
+    http_request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_currentUser),
+):
+    """无项目的默认对话:流式。project_id 传 None,路由只会落到 tool 或 direct。"""
+    local = bool(http_request.client and http_request.client.host in {'127.0.0.1', '::1'})
+    return StreamingResponse(
+        stream_qa_events(None, request, db, user, local_browser_allowed=local),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
